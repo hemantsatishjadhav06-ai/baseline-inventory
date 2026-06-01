@@ -1,0 +1,46 @@
+# Render Blueprint for Baseline
+# Deploy: push this repo to GitHub, then in Render → New → Blueprint,
+# point at the repo. Render reads this file and provisions everything.
+# Docs: https://render.com/docs/blueprint-spec
+
+services:
+  # ── Frontend: the Baseline dashboard (static site) ───────────────
+  - type: web
+    name: baseline-dashboard
+    runtime: static
+    buildCommand: npm install && npm run build
+    staticPublishPath: ./dist
+    pullRequestPreviewsEnabled: true
+    headers:
+      - path: /*
+        name: X-Frame-Options
+        value: SAMEORIGIN
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html   # SPA fallback
+
+  # ── Backend API (enable when Postgres + rotated Magento token ready) ──
+  # Uncomment to deploy the sync + replenishment API alongside the UI.
+  #
+  # - type: web
+  #   name: baseline-api
+  #   runtime: node
+  #   plan: starter
+  #   buildCommand: cd integration && npm install
+  #   startCommand: cd integration && node server.js
+  #   healthCheckPath: /api/v1/sync/status
+  #   envVars:
+  #     - key: MAGENTO_BASE_URL
+  #       value: https://console.tennisoutlet.in
+  #     - key: MAGENTO_ACCESS_TOKEN
+  #       sync: false            # set in Render dashboard (secret), NOT here
+  #     - key: DATABASE_URL
+  #       fromDatabase:
+  #         name: baseline-db
+  #         property: connectionString
+
+# databases:
+#   - name: baseline-db
+#     plan: basic-256mb
+#     postgresMajorVersion: "15"
