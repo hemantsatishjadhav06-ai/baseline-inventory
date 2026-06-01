@@ -8,7 +8,7 @@ import {
   Bell, AlertOctagon, AlertTriangle, CheckCircle2, Layers, Truck, Crown, Users, ShoppingCart,
   TrendingDown, Package, IndianRupee, Plus, Check, X, RefreshCw, Activity, Sparkles,
   Target, CalendarDays, Wallet, Award, Boxes, ArrowRight, Inbox, Send, Store, Gauge,
-  Repeat, MessageSquare, ChevronRight, ArrowRightLeft,
+  Repeat, MessageSquare, ChevronRight, ArrowRightLeft, Download,
 } from "lucide-react";
 import { SKUS as CATALOG_SKUS, CATALOG, SOURCE } from "./data.js";
 
@@ -26,6 +26,12 @@ const mono = '"IBM Plex Mono", ui-monospace, monospace';
 const inr = (n) => "₹" + Math.round(n).toLocaleString("en-IN");
 const inrC = (n) => n >= 1e7 ? "₹" + (n / 1e7).toFixed(2) + " Cr" : n >= 1e5 ? "₹" + (n / 1e5).toFixed(2) + " L" : inr(n);
 const pct = (x) => Math.round(x * 100) + "%";
+const API_BASE = "https://baseline-api-hbul.onrender.com";
+function downloadCSV(filename, rows) {
+  const csv = rows.map((r) => r.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(",")).join("\n");
+  const u = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));
+  const a = document.createElement("a"); a.href = u; a.download = filename; a.click(); URL.revokeObjectURL(u);
+}
 
 const RISK = {
   0: { label: "Stockout risk", color: C.danger, Icon: AlertOctagon },
@@ -304,16 +310,36 @@ function AskBaseline({ skus, agg, util, role }) {
     procurement: ["What should I reorder from Babolat?", "Which SKUs will stock out?", "Compare stock across stores", "Top suppliers by stock value"],
     employee: ["Do we have Babolat Pure Drive in stock?", "What should I reorder today?", "Show top sellers this week", "Which items are running low?"],
   };
-  const [msgs, setMsgs] = useState([{ role: "bot", text: `Hi — I'm Baseline AI. I read your live catalog and the replenishment engine, and answer for the ${role === "exec" ? "executive" : role === "procurement" ? "procurement" : "store"} view. Ask me anything, or tap a suggestion.` }]);
+  const [msgs, setMsgs] = useState([{ role: "bot", text: `Hi, I'm Baseline AI. I read your live catalog and the replenishment engine and answer for the ${role === "exec" ? "executive" : role === "procurement" ? "procurement" : "store"} view. Ask me anything in your own words.` }]);
   const [input, setInput] = useState("");
+  const [busy, setBusy] = useState(false);
   const endRef = useRef(null);
-  useEffect(() => { endRef.current?.scrollIntoView({ behavior: "smooth" }); }, [msgs]);
-  const ask = (q) => { if (!q.trim()) return; const a = answer(q, skus, agg, util); setMsgs((m) => [...m, { role: "user", text: q }, { role: "bot", ...a }]); setInput(""); };
+  useEffect(() => { endRef.current?.scrollIntoView({ behavior: "smooth" }); }, [msgs, busy]);
+  const buildContext = () => ({
+    sales: { today: inrC(agg.dayRev), week: inrC(agg.weekRev), month: inrC(agg.monthRev), year: inrC(agg.yearRev) },
+    utilization: { turns: util.turns.toFixed(1) + "x", gmroi: util.gmroi.toFixed(2), sellThrough: pct(util.sellThrough), capitalUtil: pct(util.capitalUtil) },
+    atRisk: skus.filter((s) => s.risk <= 1).sort((a, b) => a.cover - b.cover).slice(0, 10).map((s) => ({ name: s.name, sku: s.sku, supplier: s.supplier, cover: Math.round(s.cover), suggest: s.suggestedQty, exposed: Math.round(s.protectedRev) })),
+    deadStock: skus.filter((s) => s.risk === 4).sort((a, b) => b.stockValue - a.stockValue).slice(0, 6).map((s) => ({ name: s.name, cashLocked: Math.round(s.stockValue) })),
+    topSellers: topSellers(skus, 30).slice(0, 6).map((s) => ({ name: s.name, category: s.category, monthRevenue: Math.round(s.dailyRev * 30) })),
+    stores: STORES.length,
+  });
+  const ask = async (q) => {
+    if (!q.trim() || busy) return;
+    const local = answer(q, skus, agg, util);
+    setMsgs((m) => [...m, { role: "user", text: q }]); setInput(""); setBusy(true);
+    try {
+      const r = await fetch(API_BASE + "/api/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ role, question: q, context: buildContext(), history: msgs.slice(-6) }) });
+      const d = await r.json();
+      setMsgs((m) => [...m, { role: "bot", text: d.answer || local.text, node: local.node }]);
+    } catch {
+      setMsgs((m) => [...m, { role: "bot", text: local.text + "  (offline — showing engine answer)", node: local.node }]);
+    } finally { setBusy(false); }
+  };
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "calc(100vh - 220px)", minHeight: 460, background: C.surface, borderRadius: 14, border: `1px solid ${C.border}`, overflow: "hidden" }}>
       <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "14px 18px", borderBottom: `1px solid ${C.border}` }}>
         <div style={{ width: 32, height: 32, borderRadius: 9, background: C.purple + "1F", display: "flex", alignItems: "center", justifyContent: "center" }}><Sparkles size={17} color={C.purple} /></div>
-        <div><div style={{ fontSize: 15, fontWeight: 600 }}>Ask Baseline</div><div style={{ fontSize: 11, color: C.subtle }}>grounded in live catalog + the replenishment engine</div></div>
+        <div><div style={{ fontSize: 15, fontWeight: 600 }}>Ask Baseline</div><div style={{ fontSize: 11, color: C.subtle }}>GPT-4o-mini via OpenRouter · grounded in your live data</div></div>
         <span style={{ marginLeft: "auto", display: "inline-flex", alignItems: "center", gap: 5, fontSize: 11, color: C.success }}><span style={{ width: 6, height: 6, borderRadius: 999, background: C.success }} /> online</span>
       </div>
       <div style={{ flex: 1, overflowY: "auto", padding: 18, display: "flex", flexDirection: "column", gap: 14 }}>
@@ -325,6 +351,7 @@ function AskBaseline({ skus, agg, util, role }) {
             </div>
           </div>
         ))}
+        {busy && <div style={{ display: "flex", justifyContent: "flex-start" }}><div style={{ background: C.surfaceAlt, border: `1px solid ${C.border}`, borderRadius: 14, padding: "11px 14px", fontSize: 13, color: C.muted, display: "inline-flex", alignItems: "center", gap: 8 }}><Sparkles size={14} color={C.purple} /> Baseline is thinking…</div></div>}
         <div ref={endRef} />
       </div>
       <div style={{ padding: "10px 14px", borderTop: `1px solid ${C.border}` }}>
@@ -332,8 +359,8 @@ function AskBaseline({ skus, agg, util, role }) {
           {suggByRole[role].map((s) => <button key={s} onClick={() => ask(s)} style={{ fontSize: 12, color: C.muted, background: C.surfaceAlt, border: `1px solid ${C.border}`, borderRadius: 999, padding: "5px 11px", cursor: "pointer" }}>{s}</button>)}
         </div>
         <div style={{ display: "flex", gap: 8 }}>
-          <input value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={(e) => e.key === "Enter" && ask(input)} placeholder="Ask about stock, sales, suppliers, stores…" style={{ flex: 1, border: `1px solid ${C.border}`, borderRadius: 10, padding: "11px 14px", fontSize: 14, outline: "none", background: C.surfaceAlt, color: C.text }} />
-          <button onClick={() => ask(input)} style={{ ...btnPrimary, padding: "0 16px" }}><Send size={16} /></button>
+          <input value={input} disabled={busy} onChange={(e) => setInput(e.target.value)} onKeyDown={(e) => e.key === "Enter" && ask(input)} placeholder="Ask anything about stock, sales, suppliers, stores…" style={{ flex: 1, border: `1px solid ${C.border}`, borderRadius: 10, padding: "11px 14px", fontSize: 14, outline: "none", background: C.surfaceAlt, color: C.text }} />
+          <button onClick={() => ask(input)} disabled={busy} style={{ ...btnPrimary, padding: "0 16px", opacity: busy ? 0.5 : 1 }}><Send size={16} /></button>
         </div>
       </div>
     </div>
@@ -628,7 +655,7 @@ function AutoPO({ skus, poItems, approved, setApproved, budget, setBudget }) {
   }, [skus, poItems, budget]);
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
-      <Card title="Cash-aware purchasing" subtitle="set an open-to-buy budget — Baseline funds the highest-revenue-at-risk lines first">
+      <Card title="Cash-aware purchasing" subtitle="set an open-to-buy budget — Baseline funds the highest-revenue-at-risk lines first" action={<button onClick={() => downloadCSV("baseline-po.csv", [["Supplier", "SKU", "Product", "Qty", "Unit cost", "Line total"], ...result.drafts.flatMap((d) => d.items.filter((i) => !i._def).map((s) => [d.supplier, s.sku, s.name, s.qty, Math.round(s.unitCost), Math.round(s.qty * s.unitCost)]))])} style={{ ...btnGhost, display: "inline-flex", alignItems: "center", gap: 6 }}><Download size={14} /> Export CSV</button>}>
         <div style={{ display: "flex", alignItems: "center", gap: 16, flexWrap: "wrap" }}><div style={{ display: "flex", alignItems: "center", gap: 8 }}><Wallet size={16} color={C.muted} /><span style={{ fontSize: 13, color: C.muted }}>Open-to-buy budget</span></div><input type="range" min={0} max={2000000} step={50000} value={budget} onChange={(e) => setBudget(Number(e.target.value))} style={{ flex: 1, minWidth: 180, accentColor: C.optic }} /><span style={{ fontFamily: mono, fontWeight: 600, fontSize: 16, minWidth: 100, textAlign: "right" }}>{budget === 0 ? "No cap" : inrC(budget)}</span><span style={{ fontSize: 12, color: C.subtle }}>committing {inrC(result.spent)}</span></div>
       </Card>
       <div style={{ display: "grid", gridTemplateColumns: "repeat(2,1fr)", gap: 18, alignItems: "start" }}>
@@ -752,6 +779,7 @@ export default function BaselineDashboard() {
   const [delay, setDelay] = useState(0);
   const [budget, setBudget] = useState(0);
   const [selSku, setSelSku] = useState(null);
+  const [notifOpen, setNotifOpen] = useState(false);
   skuPortal.open = setSelSku;
 
   const skus = useMemo(() => buildSkus({ surge, delay }), [surge, delay]);
@@ -792,7 +820,23 @@ export default function BaselineDashboard() {
           <span style={{ fontSize: 11, fontWeight: 600, color: C.muted, background: C.surfaceAlt, border: `1px solid ${C.border}`, borderRadius: 999, padding: "3px 10px" }}>{ROLES[role].label}</span>
           <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 10 }}>
             <button onClick={() => setTab("ask")} style={{ ...btnGhost, display: "inline-flex", alignItems: "center", gap: 6, padding: "8px 12px", color: C.purple, borderColor: C.purple + "44" }}><Sparkles size={15} /> Ask Baseline</button>
-            <button style={{ position: "relative", width: 38, height: 38, borderRadius: 10, border: `1px solid ${C.border}`, background: C.surface, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}><Bell size={17} color={C.muted} />{alerts.length > 0 && <span style={{ position: "absolute", top: 8, right: 9, width: 7, height: 7, borderRadius: 999, background: C.danger }} />}</button>
+            <div style={{ position: "relative" }}>
+              <button onClick={() => setNotifOpen((o) => !o)} style={{ position: "relative", width: 38, height: 38, borderRadius: 10, border: `1px solid ${C.border}`, background: notifOpen ? C.surfaceAlt : C.surface, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}><Bell size={17} color={C.muted} />{alerts.length > 0 && <span style={{ position: "absolute", top: 8, right: 9, width: 7, height: 7, borderRadius: 999, background: C.danger }} />}</button>
+              {notifOpen && (
+                <div style={{ position: "absolute", right: 0, top: 46, width: 326, background: C.surface, border: `1px solid ${C.border}`, borderRadius: 12, boxShadow: "0 8px 30px rgba(14,23,38,.16)", zIndex: 120, overflow: "hidden" }}>
+                  <div style={{ padding: "12px 14px", borderBottom: `1px solid ${C.border}`, fontSize: 13, fontWeight: 600, display: "flex", justifyContent: "space-between" }}>Alerts <span style={{ color: C.danger }}>{alerts.length}</span></div>
+                  <div style={{ maxHeight: 340, overflowY: "auto" }}>
+                    {alerts.slice(0, 10).map((s) => (
+                      <div key={s.sku} onClick={() => { setNotifOpen(false); skuPortal.open(s); }} style={{ display: "flex", gap: 9, padding: "10px 14px", borderBottom: `1px solid ${C.border}`, cursor: "pointer" }}>
+                        {(() => { const I = RISK[s.risk].Icon; return <I size={15} color={RISK[s.risk].color} style={{ flexShrink: 0, marginTop: 1 }} />; })()}
+                        <div style={{ minWidth: 0 }}><div style={{ fontSize: 12.5, fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{s.name}</div><div style={{ fontSize: 11, color: C.subtle }}>{isFinite(s.cover) ? Math.round(s.cover) + "d cover · reorder " + s.suggestedQty : "review"}</div></div>
+                      </div>
+                    ))}
+                    {alerts.length === 0 && <div style={{ padding: 16, fontSize: 13, color: C.subtle }}>All clear.</div>}
+                  </div>
+                </div>
+              )}
+            </div>
             <div style={{ width: 38, height: 38, borderRadius: 999, background: C.navy600, color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 600, fontSize: 14 }}>TO</div>
           </div>
         </header>
