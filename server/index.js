@@ -44,7 +44,7 @@ app.post("/api/chat", async (req, res) => {
         Authorization: `Bearer ${KEY}`,
         "Content-Type": "application/json",
         "HTTP-Referer": "https://baseline-dashboard.onrender.com",
-        "X-Title": "Baseline — Tennis Outlet",
+        "X-Title": "Baseline - Tennis Outlet",
       },
       body: JSON.stringify({ model: MODEL, messages, max_tokens: 600, temperature: 0.3 }),
     });
