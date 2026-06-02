@@ -754,6 +754,64 @@ function SourceBar({ inline }) {
   );
 }
 
+/* ============================ COMMAND BAR (⌘K) ============================ */
+const CmdSection = ({ title }) => <div style={{ fontSize: 10, fontWeight: 600, textTransform: "uppercase", letterSpacing: ".04em", color: C.subtle, padding: "10px 10px 4px" }}>{title}</div>;
+function CmdRow({ icon: I, color, label, sub, onClick }) {
+  return (
+    <button onClick={onClick} onMouseEnter={(e) => (e.currentTarget.style.background = C.surfaceAlt)} onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")} style={{ width: "100%", display: "flex", alignItems: "center", gap: 11, padding: "9px 10px", border: "none", background: "transparent", cursor: "pointer", borderRadius: 9, textAlign: "left" }}>
+      <I size={16} color={color} /><div style={{ flex: 1, minWidth: 0 }}><div style={{ fontSize: 13, fontWeight: 500, color: C.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{label}</div>{sub && <div style={{ fontSize: 11, color: C.subtle, fontFamily: mono }}>{sub}</div>}</div><ChevronRight size={14} color={C.subtle} />
+    </button>
+  );
+}
+function CommandBar({ open, onClose, skus, go }) {
+  const [q, setQ] = useState("");
+  useEffect(() => { if (open) setQ(""); }, [open]);
+  if (!open) return null;
+  const t = q.trim().toLowerCase();
+  const views = Object.entries(VIEW_META).filter(([, v]) => !t || v.label.toLowerCase().includes(t)).slice(0, 8);
+  const skuHits = t ? skus.filter((s) => s.name.toLowerCase().includes(t) || s.sku.toLowerCase().includes(t)).slice(0, 6) : [];
+  return (
+    <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(14,23,38,.4)", zIndex: 300, display: "flex", justifyContent: "center", alignItems: "flex-start", paddingTop: "12vh" }}>
+      <div onClick={(e) => e.stopPropagation()} style={{ width: 560, maxWidth: "92vw", background: C.surface, borderRadius: 14, boxShadow: "0 20px 60px rgba(0,0,0,.3)", overflow: "hidden" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "14px 16px", borderBottom: `1px solid ${C.border}` }}>
+          <Search size={18} color={C.subtle} />
+          <input autoFocus value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search views, products, or ask Baseline…" style={{ flex: 1, border: "none", outline: "none", fontSize: 15, background: "transparent", color: C.text }} />
+          <span style={{ fontSize: 11, color: C.subtle, border: `1px solid ${C.border}`, borderRadius: 6, padding: "2px 6px" }}>esc</span>
+        </div>
+        <div style={{ maxHeight: 420, overflowY: "auto", padding: 8 }}>
+          {t && <CmdRow icon={Sparkles} color={C.purple} label={`Ask Baseline: "${q}"`} onClick={() => { go("ask"); onClose(); }} />}
+          {skuHits.length > 0 && <CmdSection title="Products" />}
+          {skuHits.map((s) => <CmdRow key={s.sku} icon={Package} color={RISK[s.risk].color} label={s.name} sub={s.sku + " · " + s.supplier} onClick={() => { skuPortal.open(s); onClose(); }} />)}
+          <CmdSection title="Go to" />
+          {views.map(([id, v]) => <CmdRow key={id} icon={v.Icon} color={C.muted} label={v.label} onClick={() => { go(id); onClose(); }} />)}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ============================ NEEDS YOU NOW ============================ */
+function NeedsNow({ skus, go }) {
+  const stockout = skus.filter((s) => s.risk === 0), reorder = skus.filter((s) => s.risk === 1), dead = skus.filter((s) => s.risk === 4);
+  const deadCash = dead.reduce((a, s) => a + s.stockValue, 0);
+  const items = [];
+  if (stockout.length) items.push({ icon: AlertOctagon, color: C.danger, title: `${stockout.length} about to stock out`, sub: "inside lead time", label: "Fix now", to: "radar" });
+  if (reorder.length) items.push({ icon: AlertTriangle, color: C.warning, title: `${reorder.length} to reorder`, sub: "cover thinning", label: "Review", to: "radar" });
+  if (deadCash > 0) items.push({ icon: Snowflake, color: C.dead, title: `${inrC(deadCash)} in dead stock`, sub: `${dead.length} SKUs frozen`, label: "Clear", to: "dead" });
+  if (!items.length) return null;
+  return (
+    <div style={{ marginBottom: 18 }}>
+      <div style={{ fontSize: 11, fontWeight: 600, textTransform: "uppercase", letterSpacing: ".04em", color: C.muted, marginBottom: 9 }}>Needs you now</div>
+      <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>{items.slice(0, 3).map((it, i) => (
+        <div key={i} style={{ flex: "1 1 230px", background: C.surface, border: `1px solid ${C.border}`, borderLeft: `3px solid ${it.color}`, borderRadius: 12, padding: "14px 16px", display: "flex", alignItems: "center", gap: 12 }}>
+          <it.icon size={20} color={it.color} /><div style={{ flex: 1, minWidth: 0 }}><div style={{ fontSize: 14, fontWeight: 600 }}>{it.title}</div><div style={{ fontSize: 12, color: C.subtle }}>{it.sub}</div></div>
+          <button onClick={() => go(it.to)} style={btnGhost}>{it.label} →</button>
+        </div>
+      ))}</div>
+    </div>
+  );
+}
+
 /* ============================ SHELL ============================ */
 const ROLES = {
   exec: { label: "CEO / CXO", Icon: Crown, nav: ["ask", "executive", "sales", "analytics", "dead", "insights"], home: "executive" },
@@ -780,7 +838,16 @@ export default function BaselineDashboard() {
   const [budget, setBudget] = useState(0);
   const [selSku, setSelSku] = useState(null);
   const [notifOpen, setNotifOpen] = useState(false);
+  const [cmdOpen, setCmdOpen] = useState(false);
   skuPortal.open = setSelSku;
+  useEffect(() => {
+    const h = (e) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") { e.preventDefault(); setCmdOpen((o) => !o); }
+      if (e.key === "Escape") { setCmdOpen(false); setNotifOpen(false); }
+    };
+    window.addEventListener("keydown", h);
+    return () => window.removeEventListener("keydown", h);
+  }, []);
 
   const skus = useMemo(() => buildSkus({ surge, delay }), [surge, delay]);
   const agg = useMemo(() => salesAgg(skus), [skus]);
@@ -819,6 +886,7 @@ export default function BaselineDashboard() {
           <h1 style={{ fontSize: 18, fontWeight: 600, margin: 0 }}>{VIEW_META[tab].label}</h1>
           <span style={{ fontSize: 11, fontWeight: 600, color: C.muted, background: C.surfaceAlt, border: `1px solid ${C.border}`, borderRadius: 999, padding: "3px 10px" }}>{ROLES[role].label}</span>
           <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 10 }}>
+            <button onClick={() => setCmdOpen(true)} style={{ ...btnGhost, display: "inline-flex", alignItems: "center", gap: 7, padding: "8px 12px", color: C.muted }}><Search size={14} /> Search <span style={{ fontSize: 10, fontWeight: 600, border: `1px solid ${C.borderStrong}`, borderRadius: 5, padding: "1px 5px", color: C.subtle }}>⌘K</span></button>
             <button onClick={() => setTab("ask")} style={{ ...btnGhost, display: "inline-flex", alignItems: "center", gap: 6, padding: "8px 12px", color: C.purple, borderColor: C.purple + "44" }}><Sparkles size={15} /> Ask Baseline</button>
             <div style={{ position: "relative" }}>
               <button onClick={() => setNotifOpen((o) => !o)} style={{ position: "relative", width: 38, height: 38, borderRadius: 10, border: `1px solid ${C.border}`, background: notifOpen ? C.surfaceAlt : C.surface, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}><Bell size={17} color={C.muted} />{alerts.length > 0 && <span style={{ position: "absolute", top: 8, right: 9, width: 7, height: 7, borderRadius: 999, background: C.danger }} />}</button>
@@ -841,6 +909,7 @@ export default function BaselineDashboard() {
           </div>
         </header>
         <main style={{ flex: 1, overflowY: "auto", padding: 24 }}>
+          {tab === ROLES[role].home && tab !== "ask" && <NeedsNow skus={skus} go={go} />}
           {tab === "ask" && <AskBaseline skus={skus} agg={agg} util={util} role={role} />}
           {tab === "executive" && <Executive skus={skus} agg={agg} util={util} go={go} />}
           {tab === "sales" && <Sales skus={skus} agg={agg} />}
@@ -857,6 +926,7 @@ export default function BaselineDashboard() {
         </main>
       </div>
 
+      <CommandBar open={cmdOpen} onClose={() => setCmdOpen(false)} skus={skus} go={(t) => setTab(t)} />
       <SkuDrawer s={selFull} onClose={() => setSelSku(null)} onAddPo={addPo} />
       {toast && <div style={{ position: "fixed", bottom: 24, left: 24, background: C.navy, color: "#fff", padding: "12px 18px", borderRadius: 10, fontSize: 13, fontWeight: 500, display: "flex", alignItems: "center", gap: 8, zIndex: 200 }}><CheckCircle2 size={16} color={C.optic} /> {toast}</div>}
     </div>
