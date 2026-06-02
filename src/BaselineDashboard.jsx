@@ -57,6 +57,26 @@ const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "
 const seasonIdx = (cat, m = MONTH) => (SEASON[cat] ? SEASON[cat][m] : 1);
 const STORES = CATALOG.stores;
 const STORE_SHORT = { tennisoutlet: "Tennis", badmintonoutlet: "Badminton", squashoutlet: "Squash", padeloutlet: "Padel", pickleballoutlet: "Pickleball", syxxsports: "Syxx" };
+/* Real website→store map from Magento (store/websites) */
+const STORE_META = {
+  tennisoutlet: { name: "Tennis Outlet", sport: "Tennis", wid: 1 },
+  padeloutlet: { name: "Padel Outlet", sport: "Padel", wid: 3 },
+  pickleballoutlet: { name: "Pickleball Outlet", sport: "Pickleball", wid: 2 },
+  badmintonoutlet: { name: "Badminton Outlet", sport: "Badminton", wid: 5 },
+  squashoutlet: { name: "Squash Outlet", sport: "Squash", wid: 6 },
+  syxxsports: { name: "Syxx Sports", sport: "Multi-sport", wid: 4 },
+};
+const STORE_CODES = Object.keys(STORE_META);
+const SHARED_CATS = ["Grips", "Bags", "Shoes", "Apparel", "Accessories"]; // shared across sports → pooling opportunity
+const storesForCat = (cat) => (SHARED_CATS.includes(cat) ? STORE_CODES : ["tennisoutlet"]);
+function storeSlices(s) {
+  const codes = storesForCat(s.category);
+  const base = [0.4, 0.15, 0.15, 0.15, 0.1, 0.05];
+  let h = 0; for (const c of s.sku) h = (h * 31 + c.charCodeAt(0)) >>> 0;
+  const w = codes.map((_, i) => base[(i + (h % codes.length)) % base.length]);
+  const tot = w.reduce((a, b) => a + b, 0);
+  return codes.map((code, i) => ({ code, qty: Math.max(0, Math.round(s.onHand * w[i] / tot)) }));
+}
 
 /* module portal so any row can open the SKU 360 drawer without prop drilling */
 const skuPortal = { open: () => {} };
@@ -749,7 +769,7 @@ function SourceBar({ inline }) {
   return (
     <div style={{ display: "flex", alignItems: "center", gap: 12, ...(inline ? {} : { background: C.navy, borderRadius: 14, padding: "12px 18px", color: "#fff" }) }}>
       <span style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 12, color: inline ? C.muted : "#fff" }}><span style={{ width: 7, height: 7, borderRadius: 999, background: C.success }} /> Catalog: <b style={{ color: inline ? C.success : C.optic }}>live</b> · {CATALOG.totalProducts.toLocaleString("en-IN")} products</span>
-      {!inline && <span style={{ fontSize: 12, color: "#A7B0C0" }}>Stock &amp; sales: modeled — grant the integration <code style={{ background: "#1F2E4D", padding: "1px 5px", borderRadius: 4 }}>Sales</code> &amp; <code style={{ background: "#1F2E4D", padding: "1px 5px", borderRadius: 4 }}>Inventory</code> scopes to go fully live.</span>}
+      {!inline && <span style={{ fontSize: 12, color: "#A7B0C0" }}>Stock &amp; sales: modeled — grant <code style={{ background: "#1F2E4D", padding: "1px 5px", borderRadius: 4 }}>Magento_Sales::actions_view</code> + <code style={{ background: "#1F2E4D", padding: "1px 5px", borderRadius: 4 }}>Magento_InventoryApi::source</code> to go fully live.</span>}
       {!inline && <span style={{ marginLeft: "auto", fontSize: 11, color: "#7C8696" }}>{CATALOG.stores.length} stores · INR</span>}
     </div>
   );
@@ -1009,6 +1029,135 @@ function ApiRef() {
   );
 }
 
+/* ============================ GROUP — MULTI-SPORT ============================ */
+function GroupView({ skus, onAddPo }) {
+  const [sport, setSport] = useState("all");
+  const inStore = (s, code) => storesForCat(s.category).includes(code);
+  // per-store aggregates
+  const stores = STORE_CODES.map((code) => {
+    const members = skus.filter((s) => inStore(s, code));
+    const slice = (s) => (storeSlices(s).find((x) => x.code === code)?.qty) || 0;
+    const stockVal = members.reduce((a, s) => a + slice(s) * s.unitCost, 0);
+    const rev = members.reduce((a, s) => a + s.dailyRev * 30 / storesForCat(s.category).length, 0);
+    const atRisk = members.filter((s) => s.risk <= 1).length;
+    return { code, ...STORE_META[code], products: members.length, stockVal, rev, atRisk };
+  }).sort((a, b) => b.stockVal - a.stockVal);
+
+  // pooling: shared SKUs at risk → consolidate the buy across stores for better tiers
+  const pool = skus.filter((s) => SHARED_CATS.includes(s.category) && s.suggestedQty > 0)
+    .map((s) => ({ s, stores: storesForCat(s.category).length, totalQty: s.suggestedQty * storesForCat(s.category).length, value: s.suggestedQty * storesForCat(s.category).length * s.unitCost }))
+    .sort((a, b) => b.value - a.value).slice(0, 8);
+  const poolValue = pool.reduce((a, p) => a + p.value, 0);
+
+  // per-company (store) order lists
+  const visibleStores = sport === "all" ? STORE_CODES : [sport];
+  const storeOrders = visibleStores.map((code) => {
+    const lines = skus.filter((s) => inStore(s, code) && s.suggestedQty > 0).sort((a, b) => b.protectedRev - a.protectedRev).slice(0, 6);
+    return { code, ...STORE_META[code], lines, total: lines.reduce((a, s) => a + s.suggestedQty * s.unitCost, 0) };
+  }).filter((o) => o.lines.length);
+
+  const td = { padding: "11px 14px", fontSize: 13, borderTop: `1px solid ${C.border}` };
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10 }}>
+        <SourceBar inline />
+        <Segment value={sport} onChange={setSport} options={[{ v: "all", l: "All sports" }, ...STORE_CODES.map((c) => ({ v: c, l: STORE_META[c].sport }))]} />
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 14 }}>
+        {stores.filter((s) => sport === "all" || s.code === sport).map((s) => (
+          <div key={s.code} style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: 16 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}><Store size={15} color={C.blue} /><span style={{ fontSize: 14, fontWeight: 600 }}>{s.name}</span><span style={{ marginLeft: "auto", fontSize: 10, fontWeight: 600, color: C.muted, background: C.surfaceAlt, borderRadius: 999, padding: "2px 8px" }}>{s.sport}</span></div>
+            <div style={{ display: "flex", gap: 16, marginTop: 12 }}>
+              <div><div style={{ fontSize: 10, color: C.muted, textTransform: "uppercase" }}>Stock value</div><div style={{ fontFamily: mono, fontSize: 16, fontWeight: 600 }}>{inrC(s.stockVal)}</div></div>
+              <div><div style={{ fontSize: 10, color: C.muted, textTransform: "uppercase" }}>Monthly rev</div><div style={{ fontFamily: mono, fontSize: 16, fontWeight: 600 }}>{inrC(s.rev)}</div></div>
+            </div>
+            <div style={{ fontSize: 12, color: s.atRisk ? C.danger : C.subtle, marginTop: 10 }}>{s.products} SKUs · {s.atRisk ? s.atRisk + " at risk" : "all healthy"}</div>
+          </div>
+        ))}
+      </div>
+
+      <Card title="Group procurement pooling" subtitle={`Consolidate shared SKUs across all sport-stores → one bigger order, better supplier tier. Pooled value ${inrC(poolValue)}.`} pad={0}>
+        <div style={{ overflowX: "auto" }}><table style={{ width: "100%", borderCollapse: "collapse" }}>
+          <thead><tr>{["Product", "Category", "Stores", "Per store", "Pooled qty", "Pooled value", ""].map((h, i) => <th key={h} style={{ textAlign: i >= 2 && i <= 5 ? "right" : i === 6 ? "right" : "left", fontSize: 11, fontWeight: 600, textTransform: "uppercase", color: C.muted, padding: "11px 14px", background: C.surfaceAlt }}>{h}</th>)}</tr></thead>
+          <tbody>{pool.map((p) => (
+            <tr key={p.s.sku} onMouseEnter={(e) => (e.currentTarget.style.background = C.surfaceAlt)} onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}>
+              <td style={td}><ProdLink s={p.s} /></td><td style={{ ...td, color: C.muted }}>{p.s.category}</td>
+              <td style={{ ...td, textAlign: "right", fontFamily: mono }}>{p.stores}</td>
+              <td style={{ ...td, textAlign: "right", fontFamily: mono }}>{p.s.suggestedQty}</td>
+              <td style={{ ...td, textAlign: "right", fontFamily: mono, fontWeight: 600, color: C.success }}>{p.totalQty}</td>
+              <td style={{ ...td, textAlign: "right", fontFamily: mono, fontWeight: 600 }}>{inrC(p.value)}</td>
+              <td style={{ ...td, textAlign: "right" }}><button onClick={() => onAddPo(p.s)} style={btnPrimary}><Plus size={12} /> Pool</button></td>
+            </tr>
+          ))}{pool.length === 0 && <tr><td style={{ ...td, color: C.subtle }} colSpan={7}>No shared SKUs need reordering right now.</td></tr>}</tbody>
+        </table></div>
+      </Card>
+
+      <div>
+        <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 10 }}>Per-company order lists {sport !== "all" && <span style={{ fontWeight: 400, color: C.subtle }}>· {STORE_META[sport].sport}</span>}</div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(2,1fr)", gap: 16, alignItems: "start" }}>
+          {storeOrders.map((o) => (
+            <div key={o.code} style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, overflow: "hidden" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "13px 16px", background: C.surfaceAlt, borderBottom: `1px solid ${C.border}` }}>
+                <div><div style={{ fontSize: 14, fontWeight: 600 }}>{o.name}</div><div style={{ fontSize: 11, color: C.subtle }}>{o.sport} · {o.lines.length} lines</div></div>
+                <div style={{ fontFamily: mono, fontSize: 16, fontWeight: 600 }}>{inrC(o.total)}</div>
+              </div>
+              <div style={{ padding: "4px 16px" }}>{o.lines.map((s, i) => (
+                <div key={s.sku} style={{ display: "flex", alignItems: "center", gap: 9, padding: "8px 0", borderBottom: i < o.lines.length - 1 ? `1px solid ${C.border}` : "none" }}>
+                  <div onClick={() => skuPortal.open(s)} style={{ flex: 1, minWidth: 0, cursor: "pointer" }}><div style={{ fontSize: 12.5, fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{s.name}</div><div style={{ fontSize: 11, color: C.subtle, fontFamily: mono }}>{s.supplier}</div></div>
+                  <span style={{ fontFamily: mono, fontSize: 12, fontWeight: 600 }}>×{s.suggestedQty}</span>
+                </div>
+              ))}</div>
+              <div style={{ padding: "0 16px 14px" }}><button onClick={() => o.lines.forEach(onAddPo)} style={{ ...btnPrimary, width: "100%", justifyContent: "center", padding: "9px" }}><Truck size={14} /> Approve {o.name} order</button></div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ============================ AUTOPILOT — done for you ============================ */
+function Autopilot({ skus, agg, util, go, addPo, approved, setApproved }) {
+  const reorder = skus.filter((s) => s.risk <= 1);
+  const bySup = {}; reorder.forEach((s) => (bySup[s.supplier] = bySup[s.supplier] || []).push(s));
+  const poCount = Object.keys(bySup).length;
+  const poValue = reorder.reduce((a, s) => a + s.suggestedQty * s.unitCost, 0);
+  const transfers = skus.filter((s) => SHARED_CATS.includes(s.category) && s.risk <= 1).slice(0, 6).length;
+  const markdowns = skus.filter((s) => s.risk === 4);
+  const markdownCash = markdowns.reduce((a, s) => a + s.stockValue, 0);
+  const decisions = [
+    { icon: ClipboardList, color: C.optic, title: `Drafted ${poCount} purchase orders`, sub: `${reorder.length} SKUs · ${inrC(poValue)} to protect ${inrC(reorder.reduce((a, s) => a + s.protectedRev, 0))} of demand`, label: "Review POs", to: "po" },
+    { icon: ArrowRightLeft, color: C.blue, title: `Suggested ${transfers} cross-store transfers`, sub: "rebalance shared stock before buying new", label: "Open group", to: "group" },
+    { icon: Snowflake, color: C.dead, title: `Flagged ${markdowns.length} dead SKUs to clear`, sub: `${inrC(markdownCash)} of cash to recover`, label: "Open dead stock", to: "dead" },
+    { icon: AlertOctagon, color: C.danger, title: `${skus.filter((s) => s.risk === 0).length} stockouts intercepted`, sub: "flagged before they hit zero", label: "Stockout radar", to: "radar" },
+  ];
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 14, background: C.navy, borderRadius: 14, padding: "16px 20px", color: "#fff" }}>
+        <div style={{ width: 40, height: 40, borderRadius: 11, background: C.optic, display: "flex", alignItems: "center", justifyContent: "center" }}><Zap size={22} color={C.opticInk} /></div>
+        <div style={{ flex: 1 }}><div style={{ fontSize: 16, fontWeight: 600 }}>Baseline did the work</div><div style={{ fontSize: 12.5, color: "#A7B0C0" }}>It analysed your live catalog and the engine, made the decisions, and prepared everything below. You just approve.</div></div>
+        <button onClick={() => { Object.values(bySup).flat().forEach(addPo); setApproved(Object.keys(bySup)); go("po"); }} style={{ ...btnPrimary, padding: "10px 16px", fontSize: 13 }}><Check size={15} /> Approve all</button>
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 14 }}>
+        <Kpi label="POs ready" value={poCount} tone={C.optic} Icon={ClipboardList} sub={inrC(poValue)} />
+        <Kpi label="Transfers" value={transfers} tone={C.blue} Icon={ArrowRightLeft} />
+        <Kpi label="Markdowns" value={markdowns.length} tone={C.dead} Icon={Snowflake} sub={inrC(markdownCash)} />
+        <Kpi label="Stockouts caught" value={skus.filter((s) => s.risk === 0).length} tone={C.danger} Icon={AlertOctagon} />
+      </div>
+      <Card title="Decisions prepared for you" subtitle="each one is ready — review or approve">
+        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>{decisions.map((d, i) => (
+          <div key={i} style={{ display: "flex", alignItems: "center", gap: 12, padding: "12px 14px", border: `1px solid ${C.border}`, borderRadius: 12, background: C.surfaceAlt }}>
+            <div style={{ width: 34, height: 34, borderRadius: 9, background: d.color + "22", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}><d.icon size={17} color={d.color === C.optic ? C.opticInk : d.color} /></div>
+            <div style={{ flex: 1, minWidth: 0 }}><div style={{ fontSize: 14, fontWeight: 600 }}>{d.title}</div><div style={{ fontSize: 12, color: C.subtle }}>{d.sub}</div></div>
+            <button onClick={() => go(d.to)} style={btnGhost}>{d.label} →</button>
+          </div>
+        ))}</div>
+      </Card>
+    </div>
+  );
+}
+
 /* ============================ COMMAND BAR (⌘K) ============================ */
 const CmdSection = ({ title }) => <div style={{ fontSize: 10, fontWeight: 600, textTransform: "uppercase", letterSpacing: ".04em", color: C.subtle, padding: "10px 10px 4px" }}>{title}</div>;
 function CmdRow({ icon: I, color, label, sub, onClick }) {
@@ -1069,8 +1218,8 @@ function NeedsNow({ skus, go }) {
 
 /* ============================ SHELL ============================ */
 const ROLES = {
-  exec: { label: "Executive & Leadership", tier: "Strategic", Icon: Crown, nav: ["ask", "executive", "sales", "analytics", "insights"], home: "executive" },
-  manager: { label: "Department Manager", tier: "Tactical", Icon: Briefcase, nav: ["ask", "tactical", "radar", "forecast", "po", "suppliers", "stores", "dead"], home: "tactical" },
+  exec: { label: "Executive & Leadership", tier: "Strategic", Icon: Crown, nav: ["ask", "executive", "autopilot", "sales", "group", "analytics", "insights"], home: "executive" },
+  manager: { label: "Department Manager", tier: "Tactical", Icon: Briefcase, nav: ["ask", "tactical", "autopilot", "group", "radar", "forecast", "po", "suppliers", "dead"], home: "tactical" },
   ops: { label: "Operational Staff", tier: "Operational", Icon: ScanLine, nav: ["ask", "opsboard", "tasks", "receiving", "lookup"], home: "opsboard" },
   analyst: { label: "Data & Business Analyst", tier: "Analytics", Icon: BarChart3, nav: ["ask", "explorer", "anomalies", "analytics", "insights"], home: "explorer" },
   bi: { label: "BI Developer / Engineer", tier: "Platform", Icon: Database, nav: ["ask", "sources", "model", "pipeline", "dictionary", "api"], home: "sources" },
@@ -1081,7 +1230,7 @@ const VIEW_META = {
   tactical: { label: "Tactical overview", Icon: Briefcase },
   radar: { label: "Stockout radar", Icon: Radar }, forecast: { label: "Forecast & what-if", Icon: Activity },
   po: { label: "Reorder / Auto-PO", Icon: ClipboardList }, suppliers: { label: "Suppliers", Icon: Award },
-  stores: { label: "Stores & transfers", Icon: Store }, dead: { label: "Dead stock", Icon: Snowflake },
+  group: { label: "Multi-sport group", Icon: Store }, autopilot: { label: "Autopilot", Icon: Zap }, dead: { label: "Dead stock", Icon: Snowflake },
   insights: { label: "AI insights", Icon: MessageSquare },
   opsboard: { label: "Operations board", Icon: Workflow }, tasks: { label: "My tasks", Icon: ClipboardList },
   receiving: { label: "Receiving", Icon: PackageCheck }, lookup: { label: "Product lookup", Icon: Search },
@@ -1184,7 +1333,8 @@ export default function BaselineDashboard() {
           {tab === "forecast" && <ForecastWhatIf surge={surge} setSurge={setSurge} delay={delay} setDelay={setDelay} skus={skus} />}
           {tab === "po" && <AutoPO skus={skus} poItems={poItems} approved={approved} setApproved={setApproved} budget={budget} setBudget={setBudget} />}
           {tab === "suppliers" && <Suppliers skus={skus} />}
-          {tab === "stores" && <StoreCompare skus={skus} />}
+          {tab === "group" && <GroupView skus={skus} onAddPo={addPo} />}
+          {tab === "autopilot" && <Autopilot skus={skus} agg={agg} util={util} go={go} addPo={addPo} approved={approved} setApproved={setApproved} />}
           {tab === "dead" && <DeadStock skus={skus} />}
           {tab === "insights" && <Insights skus={skus} agg={agg} util={util} role={role} go={go} />}
           {tab === "tasks" && <Tasks skus={skus} onAddPo={addPo} />}
