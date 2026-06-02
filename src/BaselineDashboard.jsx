@@ -68,27 +68,26 @@ const STORE_META = {
 };
 const STORE_CODES = Object.keys(STORE_META);
 const SHARED_CATS = ["Grips", "Bags", "Shoes", "Apparel", "Accessories"]; // shared across sports → pooling opportunity
-const storesForCat = (cat) => (SHARED_CATS.includes(cat) ? STORE_CODES : ["tennisoutlet"]);
+const STORE_CARRY = { tennisoutlet: 100, padeloutlet: 78, pickleballoutlet: 64, badmintonoutlet: 86, squashoutlet: 58, syxxsports: 92 }; // % of shared SKUs each store stocks
+function hashStr(str) { let h = 0; for (const c of str) h = (h * 31 + c.charCodeAt(0)) >>> 0; return h; }
+function storesFor(s) {            // stores that actually carry this SKU (racquets/strings/balls = tennis only)
+  if (!SHARED_CATS.includes(s.category)) return ["tennisoutlet"];
+  const out = ["tennisoutlet"];
+  for (const code of STORE_CODES) { if (code === "tennisoutlet") continue; if (hashStr(s.sku + code) % 100 < STORE_CARRY[code]) out.push(code); }
+  return out;
+}
 function storeSlices(s) {
-  const codes = storesForCat(s.category);
-  const base = [0.4, 0.15, 0.15, 0.15, 0.1, 0.05];
-  let h = 0; for (const c of s.sku) h = (h * 31 + c.charCodeAt(0)) >>> 0;
-  const w = codes.map((_, i) => base[(i + (h % codes.length)) % base.length]);
-  const tot = w.reduce((a, b) => a + b, 0);
+  const codes = storesFor(s);
+  const w = codes.map((c) => (c === "tennisoutlet" ? 0.45 : 0.55 * (0.6 + (hashStr(s.sku + c) % 40) / 100)));
+  const tot = w.reduce((a, b) => a + b, 0) || 1;
   return codes.map((code, i) => ({ code, qty: Math.max(0, Math.round(s.onHand * w[i] / tot)) }));
 }
+const storesForCat = (cat) => (SHARED_CATS.includes(cat) ? STORE_CODES : ["tennisoutlet"]); // back-compat
 
 /* module portal so any row can open the SKU 360 drawer without prop drilling */
 const skuPortal = { open: () => {} };
 
-function perStore(s) {
-  const base = [0.34, 0.18, 0.14, 0.12, 0.12, 0.10];
-  let h = 0; for (const ch of s.sku) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
-  const rot = h % 6;
-  const w = base.map((_, i) => base[(i + rot) % 6]);
-  const tot = w.reduce((a, b) => a + b, 0);
-  return STORES.map((st, i) => ({ store: st, qty: Math.round(s.onHand * w[i] / tot) }));
-}
+function perStore(s) { return storeSlices(s).map((x) => ({ store: x.code, qty: x.qty })); }
 
 /* ============================ ENGINE ============================ */
 function buildSkus({ surge = 0, delay = 0 } = {}) {
@@ -298,7 +297,7 @@ function answer(q, skus, agg, util) {
     return { text: `Blended gross margin is ${pct(skus.reduce((a, s) => a + s.margin, 0) / skus.length)}. By category, highest first:`, node: <Chips items={byCat.slice(0, 5).map((x) => [x.c, pct(x.m), x.m > .4 ? C.success : C.warning])} /> };
   }
   if (has("store", "transfer", "which shop", "between stores", "branch")) {
-    const rows = STORES.map((st) => ({ st, val: skus.reduce((a, s) => a + perStore(s).find((x) => x.store === st).qty * s.unitCost, 0) })).sort((a, b) => b.val - a.val);
+    const rows = STORES.map((st) => ({ st, val: skus.reduce((a, s) => a + (perStore(s).find((x) => x.store === st)?.qty || 0) * s.unitCost, 0) })).sort((a, b) => b.val - a.val);
     return { text: "Stock value by store (modeled). Tennis carries the most; rebalancing the smaller stores frees cash and cuts stockouts:", node: <Chips items={rows.map((r) => [STORE_SHORT[r.st] || r.st, inrC(r.val)])} /> };
   }
   if (has("top", "best sell", "bestsell", "selling most", "popular")) {
@@ -1032,20 +1031,20 @@ function ApiRef() {
 /* ============================ GROUP — MULTI-SPORT ============================ */
 function GroupView({ skus, onAddPo }) {
   const [sport, setSport] = useState("all");
-  const inStore = (s, code) => storesForCat(s.category).includes(code);
+  const inStore = (s, code) => storesFor(s).includes(code);
   // per-store aggregates
   const stores = STORE_CODES.map((code) => {
     const members = skus.filter((s) => inStore(s, code));
     const slice = (s) => (storeSlices(s).find((x) => x.code === code)?.qty) || 0;
     const stockVal = members.reduce((a, s) => a + slice(s) * s.unitCost, 0);
-    const rev = members.reduce((a, s) => a + s.dailyRev * 30 / storesForCat(s.category).length, 0);
+    const rev = members.reduce((a, s) => a + s.dailyRev * 30 / storesFor(s).length, 0);
     const atRisk = members.filter((s) => s.risk <= 1).length;
     return { code, ...STORE_META[code], products: members.length, stockVal, rev, atRisk };
   }).sort((a, b) => b.stockVal - a.stockVal);
 
   // pooling: shared SKUs at risk → consolidate the buy across stores for better tiers
   const pool = skus.filter((s) => SHARED_CATS.includes(s.category) && s.suggestedQty > 0)
-    .map((s) => ({ s, stores: storesForCat(s.category).length, totalQty: s.suggestedQty * storesForCat(s.category).length, value: s.suggestedQty * storesForCat(s.category).length * s.unitCost }))
+    .map((s) => { const nStores = storesFor(s).length; return { s, stores: nStores, totalQty: s.suggestedQty * nStores, value: s.suggestedQty * nStores * s.unitCost }; })
     .sort((a, b) => b.value - a.value).slice(0, 8);
   const poolValue = pool.reduce((a, p) => a + p.value, 0);
 
