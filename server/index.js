@@ -62,7 +62,7 @@ function modelOps(sku, category, price) {
   return { unitCost: cost, avgDaily, daysSinceSale, age: 20 + hmod(sku, "a", 160), onHand: 2 + hmod(sku, "o", 55), inTransit: hmod(sku, "t", 5) ? 0 : hmod(sku, "tq", 10), accuracy: +(0.86 + hmod(sku, "acc", 12) / 100).toFixed(2) };
 }
 
-const state = { lastSync: null, catalogLive: false, salesLive: false, stockLive: false, totalProducts: 0, skus: [], sales: null, errors: {}, auth: OAUTH ? "oauth" : "none" };
+const state = { lastSync: null, catalogLive: false, salesLive: false, stockLive: false, ordersLive: false, totalProducts: 0, skus: [], sales: null, topSellers: {}, errors: {}, auth: OAUTH ? "oauth" : "none" };
 
 async function syncCatalog() {
   if (!OAUTH) { state.errors.catalog = "Magento OAuth creds not set"; return; }
@@ -133,17 +133,46 @@ async function syncSales() {
   } catch (e) { state.salesLive = false; state.errors.sales = `${e.status || e.message}`; }
 }
 
+// Real per-SKU velocity + top sellers from actual order line items (last 45 days).
+async function syncOrders() {
+  try {
+    const since = istDayStartUTC(45), t0 = istDayStartUTC(0), w0 = istDayStartUTC(7), m0 = istMonthStartUTC();
+    const bySku = {}; let page = 1, seen = 0;
+    while (page <= 50) {
+      const d = await mg("/orders", { "searchCriteria[filterGroups][0][filters][0][field]": "created_at", "searchCriteria[filterGroups][0][filters][0][value]": since, "searchCriteria[filterGroups][0][filters][0][conditionType]": "gteq", "searchCriteria[pageSize]": "100", "searchCriteria[currentPage]": String(page), fields: "total_count,items[created_at,status,items[sku,name,qty_invoiced,qty_ordered,row_total]]" });
+      const tc = d.total_count || 0;
+      for (const o of d.items || []) {
+        if (o.status === "canceled") continue;
+        const ct = o.created_at || ""; const isT = ct >= t0, isW = ct >= w0, isM = ct >= m0;
+        for (const it of o.items || []) {
+          if (!it.sku) continue;
+          const q = Number(it.qty_invoiced || it.qty_ordered || 0), rev = Number(it.row_total || 0);
+          const e = bySku[it.sku] || (bySku[it.sku] = { sku: it.sku, name: it.name, u45: 0, rev45: 0, uT: 0, revT: 0, uW: 0, revW: 0, uM: 0, revM: 0, last: ct });
+          e.u45 += q; e.rev45 += rev; if (isT) { e.uT += q; e.revT += rev; } if (isW) { e.uW += q; e.revW += rev; } if (isM) { e.uM += q; e.revM += rev; }
+          if (ct > e.last) e.last = ct;
+        }
+      }
+      seen += (d.items || []).length; if (seen >= tc || !(d.items || []).length) break; page++;
+    }
+    const now = Date.now();
+    for (const s of state.skus) { const a = bySku[s.sku]; if (a) { s.avgDaily = +(a.u45 / 45).toFixed(2); s.daysSinceSale = Math.max(0, Math.floor((now - Date.parse(a.last.replace(" ", "T") + "Z")) / 86400000)); } else { s.avgDaily = 0; s.daysSinceSale = 999; } }
+    const top = (rk) => { const uk = rk.replace("rev", "u"); return Object.values(bySku).filter((x) => x[rk] > 0).sort((a, b) => b[rk] - a[rk]).slice(0, 12).map((x) => ({ sku: x.sku, name: x.name, units: Math.round(x[uk]), revenue: Math.round(x[rk]) })); };
+    state.topSellers = { today: top("revT"), week: top("revW"), month: top("revM"), all: top("rev45") };
+    state.ordersLive = true; delete state.errors.orders;
+  } catch (e) { state.ordersLive = false; state.errors.orders = String(e.status || e.message); }
+}
 let syncing = false;
 async function runSync() {
   if (syncing) return; syncing = true;
-  try { await syncCatalog(); await syncStock(); await syncSales(); state.lastSync = new Date().toISOString(); }
+  try { await syncCatalog(); await syncStock(); await syncOrders(); await syncSales(); state.lastSync = new Date().toISOString(); }
   finally { syncing = false; }
 }
 const stale = () => !state.lastSync || Date.now() - new Date(state.lastSync).getTime() > SYNC_MS;
 
 app.get("/", (_q, res) => res.json({ ok: true, service: "baseline-api", auth: state.auth, lastSync: state.lastSync, catalogLive: state.catalogLive, salesLive: state.salesLive, stockLive: state.stockLive }));
-app.get("/api/health", (_q, res) => res.json({ ok: true, model: MODEL, auth: state.auth, lastSync: state.lastSync, catalogLive: state.catalogLive, salesLive: state.salesLive, stockLive: state.stockLive, totalProducts: state.totalProducts, count: state.skus.length, sales: state.sales, errors: state.errors }));
-app.get("/api/catalog", async (_q, res) => { if (stale()) await runSync().catch(() => { }); res.json({ source: { catalog: state.catalogLive ? "live" : "unavailable", stock: state.stockLive ? "live" : "modeled", sales: state.salesLive ? "live" : "modeled" }, lastSync: state.lastSync, totalProducts: state.totalProducts, count: state.skus.length, skus: state.skus }); });
+app.get("/api/health", (_q, res) => res.json({ ok: true, model: MODEL, auth: state.auth, lastSync: state.lastSync, catalogLive: state.catalogLive, salesLive: state.salesLive, stockLive: state.stockLive, ordersLive: state.ordersLive, totalProducts: state.totalProducts, count: state.skus.length, sales: state.sales, topSellers: { today: (state.topSellers.today || []).slice(0, 3) }, errors: state.errors }));
+app.get("/api/catalog", async (_q, res) => { if (stale()) await runSync().catch(() => { }); res.json({ source: { catalog: state.catalogLive ? "live" : "unavailable", stock: state.stockLive ? "live" : "modeled", sales: state.salesLive ? "live" : "modeled", velocity: state.ordersLive ? "live" : "modeled" }, lastSync: state.lastSync, totalProducts: state.totalProducts, count: state.skus.length, skus: state.skus }); });
+app.get("/api/topsellers", async (_q, res) => { if (stale()) await runSync().catch(() => { }); res.json({ available: state.ordersLive, lastSync: state.lastSync, ...state.topSellers }); });
 app.get("/api/sales", async (_q, res) => { if (stale()) await runSync().catch(() => { }); state.salesLive ? res.json({ available: true, ...state.sales, lastSync: state.lastSync }) : res.json({ available: false, reason: state.errors.sales || "not synced" }); });
 app.post("/api/sync", async (_q, res) => { await runSync(); res.json({ ok: true, lastSync: state.lastSync, count: state.skus.length, salesLive: state.salesLive, stockLive: state.stockLive, sales: state.sales }); });
 
