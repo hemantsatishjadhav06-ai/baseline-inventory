@@ -90,8 +90,8 @@ const skuPortal = { open: () => {} };
 function perStore(s) { return storeSlices(s).map((x) => ({ store: x.code, qty: x.qty })); }
 
 /* ============================ ENGINE ============================ */
-function buildSkus({ surge = 0, delay = 0 } = {}) {
-  return CATALOG_SKUS.map((p) => {
+function buildSkus(source, { surge = 0, delay = 0 } = {}) {
+  return source.map((p) => {
     const reviewPeriod = 15, effLead = p.leadTime + delay;
     const safetyDays = Math.max(5, Math.round(effLead * 0.4));
     const reorderWindow = effLead + safetyDays, targetMaxDays = 60, deadAfterDays = 90;
@@ -1362,8 +1362,18 @@ export default function BaselineDashboard() {
     return () => window.removeEventListener("keydown", h);
   }, []);
 
-  const skus = useMemo(() => buildSkus({ surge, delay }), [surge, delay]);
-  const agg = useMemo(() => salesAgg(skus), [skus]);
+  const [liveSkus, setLiveSkus] = useState(CATALOG_SKUS);
+  const [realSales, setRealSales] = useState(null);
+  const [sync, setSync] = useState({ live: false, lastSync: null, salesLive: false });
+  useEffect(() => {
+    fetch(API_BASE + "/api/catalog").then((r) => r.json()).then((d) => {
+      if (d?.skus?.length) { setLiveSkus(d.skus); setSync((s) => ({ ...s, live: d.source?.catalog === "live", lastSync: d.lastSync, salesLive: d.source?.sales === "live" })); }
+    }).catch(() => {});
+    fetch(API_BASE + "/api/sales").then((r) => r.json()).then((d) => { if (d?.available) setRealSales(d); }).catch(() => {});
+  }, []);
+  const skus = useMemo(() => buildSkus(liveSkus, { surge, delay }), [liveSkus, surge, delay]);
+  const baseAgg = useMemo(() => salesAgg(skus), [skus]);
+  const agg = useMemo(() => (realSales ? { ...baseAgg, dayRev: realSales.today, weekRev: realSales.week, monthRev: realSales.month } : baseAgg), [baseAgg, realSales]);
   const util = useMemo(() => utilization(skus), [skus]);
   const alerts = skus.filter((s) => s.risk <= 1);
   const switchRole = (r) => { setRole(r); setTab(ROLES[r].home); };
@@ -1401,6 +1411,7 @@ export default function BaselineDashboard() {
         <header style={{ display: "flex", alignItems: "center", gap: 14, padding: "14px 24px", background: C.surface, borderBottom: `1px solid ${C.border}` }}>
           <h1 style={{ fontSize: 18, fontWeight: 600, margin: 0 }}>{VIEW_META[tab].label}</h1>
           <span style={{ fontSize: 11, fontWeight: 600, color: C.muted, background: C.surfaceAlt, border: `1px solid ${C.border}`, borderRadius: 999, padding: "3px 10px" }}>{ROLES[role].tier} · {ROLES[role].label}</span>
+          {sync.live && <span title={sync.lastSync ? "synced " + new Date(sync.lastSync).toLocaleTimeString() : ""} style={{ fontSize: 11, fontWeight: 600, color: C.success, display: "inline-flex", alignItems: "center", gap: 5 }}><span style={{ width: 6, height: 6, borderRadius: 999, background: C.success }} /> Live{sync.salesLive ? " · sales" : " catalog"}</span>}
           <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 10 }}>
             <button onClick={() => setCmdOpen(true)} style={{ ...btnGhost, display: "inline-flex", alignItems: "center", gap: 7, padding: "8px 12px", color: C.muted }}><Search size={14} /> Search <span style={{ fontSize: 10, fontWeight: 600, border: `1px solid ${C.borderStrong}`, borderRadius: 5, padding: "1px 5px", color: C.subtle }}>⌘K</span></button>
             <button onClick={() => setTab("ask")} style={{ ...btnGhost, display: "inline-flex", alignItems: "center", gap: 6, padding: "8px 12px", color: C.purple, borderColor: C.purple + "44" }}><Sparkles size={15} /> Ask Baseline</button>
