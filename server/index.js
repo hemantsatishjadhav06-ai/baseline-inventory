@@ -97,10 +97,10 @@ async function syncCatalog() {
 async function syncStock() {
   try {
     const map = {}; let page = 1;
-    while (page <= 20) {
-      const d = await mg("/inventory/source-items", { "searchCriteria[pageSize]": "500", "searchCriteria[currentPage]": String(page) });
+    while (page <= 40) {
+      const d = await mg("/inventory/source-items", { "searchCriteria[pageSize]": "200", "searchCriteria[currentPage]": String(page) });
       for (const it of d.items || []) map[it.sku] = (map[it.sku] || 0) + Number(it.quantity || 0);
-      const tc = d.total_count || 0; if (page * 500 >= tc || !(d.items || []).length) break; page++;
+      const tc = d.total_count || 0; if (page * 200 >= tc || !(d.items || []).length) break; page++;
     }
     let applied = 0;
     for (const s of state.skus) { if (map[s.sku] != null) { s.onHand = Math.round(map[s.sku]); applied++; } }
