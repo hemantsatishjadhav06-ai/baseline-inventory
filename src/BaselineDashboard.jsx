@@ -9,6 +9,7 @@ import {
   TrendingDown, Package, IndianRupee, Plus, Check, X, RefreshCw, Activity, Sparkles,
   Target, CalendarDays, Wallet, Award, Boxes, ArrowRight, Inbox, Send, Store, Gauge,
   Repeat, MessageSquare, ChevronRight, ArrowRightLeft, Download,
+  Briefcase, Database, Server, GitBranch, Table, Code, Filter, ScanLine, PackageCheck, Workflow, FileCode, BarChart3, Zap,
 } from "lucide-react";
 import { SKUS as CATALOG_SKUS, CATALOG, SOURCE } from "./data.js";
 
@@ -754,6 +755,260 @@ function SourceBar({ inline }) {
   );
 }
 
+/* ============================ TACTICAL (Department Managers) ============================ */
+function Tactical({ skus, go }) {
+  const m = {};
+  skus.forEach((s) => { const c = (m[s.category] = m[s.category] || { cat: s.category, rev: 0, val: 0, mg: [], tn: [], risk: 0, n: 0 }); c.rev += s.dailyRev * 30; c.val += s.stockValue; c.mg.push(s.margin); c.tn.push(s.turns); if (s.risk <= 1) c.risk++; c.n++; });
+  const rows = Object.values(m).map((c) => ({ ...c, marginPct: c.mg.reduce((a, b) => a + b, 0) / c.mg.length, turns: c.tn.reduce((a, b) => a + b, 0) / c.tn.length })).sort((a, b) => b.rev - a.rev);
+  const atRisk = skus.filter((s) => s.risk <= 1).length, dead = skus.filter((s) => s.risk === 4).reduce((a, s) => a + s.stockValue, 0);
+  const td = { padding: "11px 14px", fontSize: 13, borderTop: `1px solid ${C.border}` };
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
+      <SourceBar inline />
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 14 }}>
+        <Kpi label="SKUs needing action" value={atRisk} tone={C.warning} Icon={AlertTriangle} sub="reorder / stockout" />
+        <Kpi label="Categories" value={rows.length} Icon={Layers} />
+        <Kpi label="Dead-stock cash" value={inrC(dead)} tone={C.dead} Icon={Snowflake} />
+        <Kpi label="Suppliers in play" value={new Set(skus.map((s) => s.supplier)).size} Icon={Award} />
+      </div>
+      <Card title="Category performance" subtitle="tactical view — revenue, margin, turns and risk by category" pad={0}>
+        <div style={{ overflowX: "auto" }}><table style={{ width: "100%", borderCollapse: "collapse" }}>
+          <thead><tr>{["Category", "Monthly rev", "Margin", "Turns", "At risk", "Stock value", ""].map((h, i) => <th key={h} style={{ textAlign: i === 0 ? "left" : i === 6 ? "right" : "right", fontSize: 11, fontWeight: 600, textTransform: "uppercase", color: C.muted, padding: "11px 14px", background: C.surfaceAlt }}>{h}</th>)}</tr></thead>
+          <tbody>{rows.map((c) => (
+            <tr key={c.cat} onMouseEnter={(e) => (e.currentTarget.style.background = C.surfaceAlt)} onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}>
+              <td style={{ ...td, fontWeight: 500 }}>{c.cat}</td>
+              <td style={{ ...td, textAlign: "right", fontFamily: mono, fontWeight: 600 }}>{inrC(c.rev)}</td>
+              <td style={{ ...td, textAlign: "right", fontFamily: mono, color: c.marginPct > .4 ? C.success : C.warning }}>{pct(c.marginPct)}</td>
+              <td style={{ ...td, textAlign: "right", fontFamily: mono }}>{c.turns.toFixed(1)}×</td>
+              <td style={{ ...td, textAlign: "right", fontFamily: mono, color: c.risk ? C.danger : C.subtle, fontWeight: 600 }}>{c.risk || "—"}</td>
+              <td style={{ ...td, textAlign: "right", fontFamily: mono }}>{inrC(c.val)}</td>
+              <td style={{ ...td, textAlign: "right" }}><button onClick={() => go("radar")} style={btnGhost}>Open →</button></td>
+            </tr>
+          ))}</tbody>
+        </table></div>
+      </Card>
+    </div>
+  );
+}
+
+/* ============================ OPERATIONS BOARD ============================ */
+function OpsBoard({ skus, go, onAddPo }) {
+  const reorder = skus.filter((s) => s.risk <= 1).sort((a, b) => a.cover - b.cover).slice(0, 8);
+  const incoming = skus.filter((s) => s.inTransit > 0).slice(0, 8);
+  const watch = skus.filter((s) => s.risk >= 3).sort((a, b) => b.stockValue - a.stockValue).slice(0, 8);
+  const Col = ({ title, color, count, items, render }) => (
+    <div style={{ flex: 1, minWidth: 0, background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, display: "flex", flexDirection: "column" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "13px 16px", borderBottom: `1px solid ${C.border}` }}><span style={{ width: 8, height: 8, borderRadius: 999, background: color }} /><span style={{ fontSize: 14, fontWeight: 600 }}>{title}</span><span style={{ marginLeft: "auto", fontFamily: mono, fontSize: 12, color: C.muted }}>{count}</span></div>
+      <div style={{ padding: "6px 14px", maxHeight: 460, overflowY: "auto" }}>{items.length ? items.map(render) : <div style={{ fontSize: 13, color: C.subtle, padding: "12px 0" }}>Nothing here.</div>}</div>
+    </div>
+  );
+  const card = (s, right) => (
+    <div key={s.sku} style={{ display: "flex", alignItems: "center", gap: 9, padding: "10px 0", borderBottom: `1px solid ${C.border}` }}>
+      <div onClick={() => skuPortal.open(s)} style={{ flex: 1, minWidth: 0, cursor: "pointer" }}><div style={{ fontSize: 13, fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{s.name}</div><div style={{ fontSize: 11, color: C.subtle, fontFamily: mono }}>{s.sku}</div></div>{right(s)}
+    </div>
+  );
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 14 }}>
+        <Kpi label="To reorder" value={skus.filter((s) => s.risk <= 1).length} tone={C.warning} Icon={ClipboardList} />
+        <Kpi label="To receive" value={incoming.length} tone={C.info} Icon={Inbox} />
+        <Kpi label="To review" value={skus.filter((s) => s.risk >= 3).length} tone={C.overstock} Icon={Layers} />
+      </div>
+      <div style={{ display: "flex", gap: 16, alignItems: "flex-start" }}>
+        <Col title="Reorder" color={C.warning} count={reorder.length} items={reorder} render={(s) => card(s, (s) => <button onClick={() => onAddPo(s)} style={btnPrimary}><Plus size={12} /> {s.suggestedQty}</button>)} />
+        <Col title="Receive" color={C.info} count={incoming.length} items={incoming} render={(s) => card(s, (s) => <span style={{ fontFamily: mono, fontWeight: 600, color: C.info }}>+{s.inTransit}</span>)} />
+        <Col title="Review" color={C.overstock} count={watch.length} items={watch} render={(s) => card(s, (s) => <span style={{ fontFamily: mono, fontSize: 12, color: C.muted }}>{inrC(s.stockValue)}</span>)} />
+      </div>
+    </div>
+  );
+}
+function Receiving({ skus }) {
+  const incoming = skus.filter((s) => s.inTransit > 0);
+  const [recv, setRecv] = useState([]);
+  return (
+    <Card title="Incoming stock" subtitle="mark items received as they arrive" pad={0}>
+      <div style={{ padding: "4px 18px" }}>{incoming.length === 0 ? <div style={{ fontSize: 13, color: C.subtle, padding: "12px 0" }}>Nothing in transit.</div> : incoming.map((s, i) => (
+        <div key={s.sku} style={{ display: "flex", alignItems: "center", gap: 12, padding: "12px 0", borderBottom: i < incoming.length - 1 ? `1px solid ${C.border}` : "none", opacity: recv.includes(s.sku) ? 0.5 : 1 }}>
+          <PackageCheck size={17} color={recv.includes(s.sku) ? C.success : C.info} />
+          <div onClick={() => skuPortal.open(s)} style={{ flex: 1, minWidth: 0, cursor: "pointer" }}><div style={{ fontSize: 13, fontWeight: 500 }}>{s.name}</div><div style={{ fontSize: 11, color: C.subtle, fontFamily: mono }}>{s.sku} · {s.supplier}</div></div>
+          <span style={{ fontFamily: mono, fontWeight: 600, color: C.info }}>+{s.inTransit}</span>
+          <button onClick={() => setRecv((r) => r.includes(s.sku) ? r.filter((x) => x !== s.sku) : [...r, s.sku])} style={recv.includes(s.sku) ? { ...btnGhost, color: C.success, borderColor: C.success + "55" } : btnPrimary}>{recv.includes(s.sku) ? "Received" : "Receive"}</button>
+        </div>
+      ))}</div>
+    </Card>
+  );
+}
+
+/* ============================ DATA EXPLORER (Analysts) ============================ */
+const DIMS = { category: "Category", supplier: "Supplier", risk: "Risk status" };
+const METRICS = {
+  rev: { label: "Monthly revenue", agg: "sum", get: (s) => s.dailyRev * 30, fmt: inrC },
+  units: { label: "Units / month", agg: "sum", get: (s) => s.forecastDaily * 30, fmt: (v) => Math.round(v).toLocaleString("en-IN") },
+  stock: { label: "Stock value", agg: "sum", get: (s) => s.stockValue, fmt: inrC },
+  margin: { label: "Avg margin %", agg: "mean", get: (s) => s.margin, fmt: pct },
+  turns: { label: "Avg inventory turns", agg: "mean", get: (s) => s.turns, fmt: (v) => v.toFixed(1) + "×" },
+  count: { label: "SKU count", agg: "sum", get: () => 1, fmt: (v) => Math.round(v) },
+};
+function Explorer({ skus }) {
+  const [dim, setDim] = useState("category");
+  const [metric, setMetric] = useState("rev");
+  const M = METRICS[metric];
+  const groups = {};
+  skus.forEach((s) => { const k = dim === "risk" ? RISK[s.risk].label : s[dim]; (groups[k] = groups[k] || []).push(M.get(s)); });
+  const rows = Object.entries(groups).map(([k, arr]) => ({ k, v: M.agg === "mean" ? arr.reduce((a, b) => a + b, 0) / arr.length : arr.reduce((a, b) => a + b, 0), n: arr.length })).sort((a, b) => b.v - a.v);
+  const td = { padding: "11px 14px", fontSize: 13, borderTop: `1px solid ${C.border}` };
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
+      <Card title="Data explorer" subtitle="self-serve pivot — choose a dimension and a metric" action={<button onClick={() => downloadCSV(`baseline-${dim}-${metric}.csv`, [[DIMS[dim], M.label, "SKUs"], ...rows.map((r) => [r.k, Math.round(r.v), r.n])])} style={{ ...btnGhost, display: "inline-flex", alignItems: "center", gap: 6 }}><Download size={14} /> Export</button>}>
+        <div style={{ display: "flex", gap: 20, flexWrap: "wrap", marginBottom: 16 }}>
+          <div><div style={{ fontSize: 11, color: C.muted, marginBottom: 6, textTransform: "uppercase", letterSpacing: ".03em" }}>Group by</div><Segment value={dim} onChange={setDim} options={Object.entries(DIMS).map(([v, l]) => ({ v, l }))} /></div>
+          <div><div style={{ fontSize: 11, color: C.muted, marginBottom: 6, textTransform: "uppercase", letterSpacing: ".03em" }}>Measure</div><Segment value={metric} onChange={setMetric} options={Object.entries(METRICS).map(([v, m]) => ({ v, l: m.label.replace("Avg ", "").replace(" / month", "/mo").replace("Monthly ", "") }))} /></div>
+        </div>
+        <div style={{ height: 260 }}>
+          <ResponsiveContainer width="100%" height="100%">
+            <BarChart data={rows} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
+              <CartesianGrid strokeDasharray="3 3" stroke={C.border} vertical={false} />
+              <XAxis dataKey="k" tick={{ fontSize: 10, fill: C.subtle }} axisLine={false} tickLine={false} interval={0} angle={-12} textAnchor="end" height={48} />
+              <YAxis tick={{ fontSize: 11, fill: C.subtle }} axisLine={false} tickLine={false} tickFormatter={(v) => M.fmt(v)} width={64} />
+              <Tooltip content={<Tip fmt={M.fmt} />} cursor={{ fill: C.surfaceAlt }} />
+              <Bar dataKey="v" name={M.label} radius={[6, 6, 0, 0]}>{rows.map((e, i) => <Cell key={i} fill={catColors[i % catColors.length]} />)}</Bar>
+            </BarChart>
+          </ResponsiveContainer>
+        </div>
+      </Card>
+      <Card title="Result set" pad={0}>
+        <div style={{ overflowX: "auto" }}><table style={{ width: "100%", borderCollapse: "collapse" }}>
+          <thead><tr>{[DIMS[dim], M.label, "SKUs"].map((h, i) => <th key={h} style={{ textAlign: i === 0 ? "left" : "right", fontSize: 11, fontWeight: 600, textTransform: "uppercase", color: C.muted, padding: "11px 14px", background: C.surfaceAlt }}>{h}</th>)}</tr></thead>
+          <tbody>{rows.map((r) => (<tr key={r.k}><td style={{ ...td, fontWeight: 500 }}>{r.k}</td><td style={{ ...td, textAlign: "right", fontFamily: mono, fontWeight: 600 }}>{M.fmt(r.v)}</td><td style={{ ...td, textAlign: "right", fontFamily: mono, color: C.muted }}>{r.n}</td></tr>))}</tbody>
+        </table></div>
+      </Card>
+    </div>
+  );
+}
+
+/* ============================ ANOMALIES (Analysts) ============================ */
+function Anomalies({ skus }) {
+  const out = [];
+  skus.filter((s) => s.risk === 0).sort((a, b) => b.protectedRev - a.protectedRev).slice(0, 4).forEach((s) => out.push({ sev: "high", icon: AlertOctagon, color: C.danger, title: `${s.name} — imminent stockout`, sub: `~${Math.round(s.cover)}d cover, ${inrC(s.protectedRev)} exposed`, s }));
+  skus.filter((s) => s.risk === 4 && s.stockValue > 5000).sort((a, b) => b.stockValue - a.stockValue).slice(0, 3).forEach((s) => out.push({ sev: "high", icon: Snowflake, color: C.dead, title: `${s.name} — dead, cash frozen`, sub: `${inrC(s.stockValue)} locked, no sale ${s.daysSinceSale}d`, s }));
+  skus.filter((s) => s.accuracy < 0.86).slice(0, 3).forEach((s) => out.push({ sev: "med", icon: Target, color: C.warning, title: `${s.name} — forecast unreliable`, sub: `accuracy ${pct(s.accuracy)} — needs more history`, s }));
+  skus.filter((s) => s.risk === 3 && s.stockValue > 8000).sort((a, b) => b.stockValue - a.stockValue).slice(0, 3).forEach((s) => out.push({ sev: "low", icon: Layers, color: C.overstock, title: `${s.name} — overstocked`, sub: `${Math.round(s.cover)}d of cover, ${inrC(s.stockValue)} tied up`, s }));
+  const sevRank = { high: 0, med: 1, low: 2 };
+  out.sort((a, b) => sevRank[a.sev] - sevRank[b.sev]);
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 14 }}>
+        <Kpi label="High severity" value={out.filter((o) => o.sev === "high").length} tone={C.danger} Icon={AlertOctagon} />
+        <Kpi label="Medium" value={out.filter((o) => o.sev === "med").length} tone={C.warning} Icon={AlertTriangle} />
+        <Kpi label="Low" value={out.filter((o) => o.sev === "low").length} tone={C.info} Icon={Activity} />
+      </div>
+      <Card title="Detected anomalies" subtitle="auto-flagged from the engine — click to inspect" pad={0}>
+        <div style={{ padding: "4px 18px" }}>{out.map((o, i) => (
+          <div key={i} onClick={() => skuPortal.open(o.s)} style={{ display: "flex", alignItems: "center", gap: 12, padding: "12px 0", borderBottom: i < out.length - 1 ? `1px solid ${C.border}` : "none", cursor: "pointer" }}>
+            <div style={{ width: 30, height: 30, borderRadius: 8, background: o.color + "1A", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}><o.icon size={16} color={o.color} /></div>
+            <div style={{ flex: 1, minWidth: 0 }}><div style={{ fontSize: 13, fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{o.title}</div><div style={{ fontSize: 11, color: C.subtle }}>{o.sub}</div></div>
+            <span style={{ fontSize: 10, fontWeight: 600, textTransform: "uppercase", color: o.color, background: o.color + "1A", borderRadius: 6, padding: "2px 7px" }}>{o.sev}</span>
+          </div>
+        ))}</div>
+      </Card>
+    </div>
+  );
+}
+
+/* ============================ BI ENGINEER VIEWS ============================ */
+function KVTable({ cols, rows }) {
+  const td = { padding: "10px 14px", fontSize: 13, borderTop: `1px solid ${C.border}`, verticalAlign: "top" };
+  return (
+    <div style={{ overflowX: "auto" }}><table style={{ width: "100%", borderCollapse: "collapse" }}>
+      <thead><tr>{cols.map((c, i) => <th key={c} style={{ textAlign: "left", fontSize: 11, fontWeight: 600, textTransform: "uppercase", color: C.muted, padding: "11px 14px", background: C.surfaceAlt }}>{c}</th>)}</tr></thead>
+      <tbody>{rows.map((r, i) => <tr key={i}>{r.map((cell, j) => <td key={j} style={{ ...td, fontFamily: j === 0 ? mono : "inherit", fontWeight: j === 0 ? 600 : 400, color: j === 0 ? C.text : C.muted }}>{cell}</td>)}</tr>)}</tbody>
+    </table></div>
+  );
+}
+const Pill = ({ text, color }) => <span style={{ fontSize: 11, fontWeight: 600, color, background: color + "1A", borderRadius: 999, padding: "2px 9px" }}>{text}</span>;
+function DataSources() {
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
+      <SourceBar />
+      <Card title="Connected sources" subtitle="live integrations feeding Baseline" pad={0}>
+        <KVTable cols={["Source", "Type", "Scope", "Status", "Last sync", "Records"]} rows={[
+          ["Magento — catalog", "REST API", "products:read", <Pill text="Live" color={C.success} />, "just now", "7,216"],
+          ["Magento — inventory", "REST API", "stock:read", <Pill text="Needs scope" color={C.warning} />, "—", "—"],
+          ["Magento — orders", "REST API", "sales:read", <Pill text="Needs scope" color={C.warning} />, "—", "—"],
+          ["OpenRouter", "LLM proxy", "gpt-4o-mini", <Pill text="Connected" color={C.success} />, "on demand", "—"],
+          ["Postgres warehouse", "Database", "read/write", <Pill text="Planned (3a)" color={C.info} />, "—", "—"],
+        ]} />
+      </Card>
+    </div>
+  );
+}
+function SemanticModel() {
+  return (
+    <Card title="Metric catalog (semantic layer)" subtitle="the single source of truth — every metric, defined once" pad={0}>
+      <KVTable cols={["Metric", "Definition", "Grain"]} rows={[
+        ["days_of_cover", "(on_hand + in_transit) ÷ forecast_daily_demand", "SKU"],
+        ["forecast_daily", "avg_daily_sales × seasonal_index(category, month)", "SKU · month"],
+        ["reorder_point", "avg_daily × lead_time + safety_stock", "SKU"],
+        ["safety_stock", "z(service_level) × σ(daily_sales) × √lead_time", "SKU"],
+        ["risk_level", "0 stockout · 1 reorder · 2 healthy · 3 overstock · 4 dead", "SKU"],
+        ["inventory_turns", "annual_COGS ÷ avg_inventory_value", "SKU · category · total"],
+        ["gmroi", "annual_gross_profit ÷ avg_inventory_cost", "SKU · category"],
+        ["sell_through", "units_sold ÷ (units_sold + on_hand)", "SKU · period"],
+        ["protected_revenue", "forecast_daily × price × lead_time", "SKU"],
+        ["capital_utilisation", "1 − (dead + overstock value) ÷ total inventory value", "total"],
+      ]} />
+    </Card>
+  );
+}
+function PipelineMonitor() {
+  return (
+    <Card title="Pipeline & jobs" subtitle="data and engine jobs — schedule, status, last run" pad={0}>
+      <KVTable cols={["Job", "Schedule", "Status", "Last run"]} rows={[
+        ["catalog_sync", "every 15 min", <Pill text="Live" color={C.success} />, "2 min ago"],
+        ["stock_orders_delta", "every 60 s (3a)", <Pill text="Pending scope" color={C.warning} />, "—"],
+        ["forecast_recompute", "hourly", <Pill text="Live" color={C.success} />, "38 min ago"],
+        ["nightly_reconcile", "daily 02:00", <Pill text="Live" color={C.success} />, "last night"],
+        ["action_executor", "event-driven (3b)", <Pill text="Planned" color={C.info} />, "—"],
+        ["anomaly_scan", "every 30 min", <Pill text="Live" color={C.success} />, "11 min ago"],
+      ]} />
+    </Card>
+  );
+}
+function DataDictionary() {
+  return (
+    <Card title="Data dictionary" subtitle="warehouse schema — tables and key fields" pad={0}>
+      <KVTable cols={["Table", "Key fields", "Purpose"]} rows={[
+        ["product", "sku, name, category, supplier_id, unit_cost, price", "Canonical catalog from Magento"],
+        ["supplier", "id, name, lead_time_days, moq_value, otif", "Supplier master + reliability"],
+        ["stock_snapshot", "sku, on_hand, in_transit, captured_at", "Time-series on-hand"],
+        ["sales_daily", "sku, sale_date, units, revenue", "Daily sell-through (from orders)"],
+        ["replenishment", "sku, days_cover, reorder_point, suggested_qty, risk_level", "Engine output, recomputed each run"],
+        ["po_draft / po_line", "id, supplier_id, status, total_value, qty", "Suggested & approved purchase orders"],
+        ["action_log", "id, type, actor, payload, status, ts", "Immutable audit of every action"],
+        ["sync_run", "id, entity, status, rows, error", "Sync observability"],
+      ]} />
+    </Card>
+  );
+}
+function ApiRef() {
+  const td = { padding: "10px 14px", fontSize: 13, borderTop: `1px solid ${C.border}` };
+  const rows = [
+    ["GET", "/api/v1/overview", "KPIs + BI series"], ["GET", "/api/v1/skus", "Filterable SKU grid"],
+    ["GET", "/api/v1/skus/{sku}", "SKU 360 detail"], ["GET", "/api/v1/stockout-radar", "At-risk SKUs ranked"],
+    ["GET", "/api/v1/dead-stock", "Dead + overstock + trapped cash"], ["GET", "/api/v1/po-drafts", "Supplier-grouped drafts"],
+    ["POST", "/api/v1/po-drafts/{id}/approve", "Approve & send a PO"], ["GET", "/api/v1/sync/status", "Sync health"],
+    ["POST", "/api/chat", "Ask Baseline (LLM, live)"],
+  ];
+  return (
+    <Card title="API reference" subtitle="endpoints powering the app + AI" pad={0}>
+      <div style={{ overflowX: "auto" }}><table style={{ width: "100%", borderCollapse: "collapse" }}>
+        <thead><tr>{["Method", "Endpoint", "Description"].map((h) => <th key={h} style={{ textAlign: "left", fontSize: 11, fontWeight: 600, textTransform: "uppercase", color: C.muted, padding: "11px 14px", background: C.surfaceAlt }}>{h}</th>)}</tr></thead>
+        <tbody>{rows.map((r, i) => (<tr key={i}><td style={{ ...td }}><Pill text={r[0]} color={r[0] === "GET" ? C.blue : C.success} /></td><td style={{ ...td, fontFamily: mono, fontWeight: 600 }}>{r[1]}</td><td style={{ ...td, color: C.muted }}>{r[2]}</td></tr>))}</tbody>
+      </table></div>
+    </Card>
+  );
+}
+
 /* ============================ COMMAND BAR (⌘K) ============================ */
 const CmdSection = ({ title }) => <div style={{ fontSize: 10, fontWeight: 600, textTransform: "uppercase", letterSpacing: ".04em", color: C.subtle, padding: "10px 10px 4px" }}>{title}</div>;
 function CmdRow({ icon: I, color, label, sub, onClick }) {
@@ -814,17 +1069,25 @@ function NeedsNow({ skus, go }) {
 
 /* ============================ SHELL ============================ */
 const ROLES = {
-  exec: { label: "CEO / CXO", Icon: Crown, nav: ["ask", "executive", "sales", "analytics", "dead", "insights"], home: "executive" },
-  procurement: { label: "Procurement", Icon: ShoppingCart, nav: ["ask", "radar", "forecast", "po", "suppliers", "stores", "insights"], home: "radar" },
-  employee: { label: "Store team", Icon: Users, nav: ["ask", "tasks", "lookup"], home: "tasks" },
+  exec: { label: "Executive & Leadership", tier: "Strategic", Icon: Crown, nav: ["ask", "executive", "sales", "analytics", "insights"], home: "executive" },
+  manager: { label: "Department Manager", tier: "Tactical", Icon: Briefcase, nav: ["ask", "tactical", "radar", "forecast", "po", "suppliers", "stores", "dead"], home: "tactical" },
+  ops: { label: "Operational Staff", tier: "Operational", Icon: ScanLine, nav: ["ask", "opsboard", "tasks", "receiving", "lookup"], home: "opsboard" },
+  analyst: { label: "Data & Business Analyst", tier: "Analytics", Icon: BarChart3, nav: ["ask", "explorer", "anomalies", "analytics", "insights"], home: "explorer" },
+  bi: { label: "BI Developer / Engineer", tier: "Platform", Icon: Database, nav: ["ask", "sources", "model", "pipeline", "dictionary", "api"], home: "sources" },
 };
 const VIEW_META = {
   ask: { label: "Ask Baseline", Icon: Sparkles }, executive: { label: "Executive overview", Icon: LayoutDashboard },
   sales: { label: "Sales", Icon: TrendingUp }, analytics: { label: "Utilization analytics", Icon: Gauge },
+  tactical: { label: "Tactical overview", Icon: Briefcase },
   radar: { label: "Stockout radar", Icon: Radar }, forecast: { label: "Forecast & what-if", Icon: Activity },
   po: { label: "Reorder / Auto-PO", Icon: ClipboardList }, suppliers: { label: "Suppliers", Icon: Award },
   stores: { label: "Stores & transfers", Icon: Store }, dead: { label: "Dead stock", Icon: Snowflake },
-  insights: { label: "AI insights", Icon: MessageSquare }, tasks: { label: "My tasks", Icon: ClipboardList }, lookup: { label: "Product lookup", Icon: Search },
+  insights: { label: "AI insights", Icon: MessageSquare },
+  opsboard: { label: "Operations board", Icon: Workflow }, tasks: { label: "My tasks", Icon: ClipboardList },
+  receiving: { label: "Receiving", Icon: PackageCheck }, lookup: { label: "Product lookup", Icon: Search },
+  explorer: { label: "Data explorer", Icon: Filter }, anomalies: { label: "Anomalies", Icon: Zap },
+  sources: { label: "Data sources", Icon: Server }, model: { label: "Metric catalog", Icon: Code },
+  pipeline: { label: "Pipeline & jobs", Icon: GitBranch }, dictionary: { label: "Data dictionary", Icon: Table }, api: { label: "API reference", Icon: FileCode },
 };
 
 export default function BaselineDashboard() {
@@ -867,7 +1130,10 @@ export default function BaselineDashboard() {
         <div style={{ padding: "0 4px 16px" }}>
           <div style={{ fontSize: 10, color: "#7C8696", textTransform: "uppercase", letterSpacing: ".05em", marginBottom: 7, paddingLeft: 4 }}>Workspace</div>
           <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>{Object.entries(ROLES).map(([k, r]) => (
-            <button key={k} onClick={() => switchRole(k)} style={{ display: "flex", alignItems: "center", gap: 9, padding: "8px 10px", borderRadius: 9, border: "none", cursor: "pointer", textAlign: "left", fontSize: 13, fontWeight: role === k ? 600 : 500, background: role === k ? C.optic : "transparent", color: role === k ? C.opticInk : "#A7B0C0" }}><r.Icon size={15} /> {r.label}</button>
+            <button key={k} onClick={() => switchRole(k)} style={{ display: "flex", alignItems: "center", gap: 9, padding: "8px 10px", borderRadius: 9, border: "none", cursor: "pointer", textAlign: "left", background: role === k ? C.optic : "transparent", color: role === k ? C.opticInk : "#A7B0C0" }}>
+              <r.Icon size={15} style={{ flexShrink: 0 }} />
+              <span style={{ minWidth: 0 }}><span style={{ display: "block", fontSize: 12.5, fontWeight: role === k ? 600 : 500, lineHeight: 1.2 }}>{r.label}</span><span style={{ display: "block", fontSize: 10, opacity: 0.75 }}>{r.tier} dashboards</span></span>
+            </button>
           ))}</div>
         </div>
         <div style={{ height: 1, background: C.navy600, margin: "0 4px 14px" }} />
@@ -884,7 +1150,7 @@ export default function BaselineDashboard() {
       <div style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0 }}>
         <header style={{ display: "flex", alignItems: "center", gap: 14, padding: "14px 24px", background: C.surface, borderBottom: `1px solid ${C.border}` }}>
           <h1 style={{ fontSize: 18, fontWeight: 600, margin: 0 }}>{VIEW_META[tab].label}</h1>
-          <span style={{ fontSize: 11, fontWeight: 600, color: C.muted, background: C.surfaceAlt, border: `1px solid ${C.border}`, borderRadius: 999, padding: "3px 10px" }}>{ROLES[role].label}</span>
+          <span style={{ fontSize: 11, fontWeight: 600, color: C.muted, background: C.surfaceAlt, border: `1px solid ${C.border}`, borderRadius: 999, padding: "3px 10px" }}>{ROLES[role].tier} · {ROLES[role].label}</span>
           <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 10 }}>
             <button onClick={() => setCmdOpen(true)} style={{ ...btnGhost, display: "inline-flex", alignItems: "center", gap: 7, padding: "8px 12px", color: C.muted }}><Search size={14} /> Search <span style={{ fontSize: 10, fontWeight: 600, border: `1px solid ${C.borderStrong}`, borderRadius: 5, padding: "1px 5px", color: C.subtle }}>⌘K</span></button>
             <button onClick={() => setTab("ask")} style={{ ...btnGhost, display: "inline-flex", alignItems: "center", gap: 6, padding: "8px 12px", color: C.purple, borderColor: C.purple + "44" }}><Sparkles size={15} /> Ask Baseline</button>
@@ -923,6 +1189,16 @@ export default function BaselineDashboard() {
           {tab === "insights" && <Insights skus={skus} agg={agg} util={util} role={role} go={go} />}
           {tab === "tasks" && <Tasks skus={skus} onAddPo={addPo} />}
           {tab === "lookup" && <Lookup skus={skus} />}
+          {tab === "tactical" && <Tactical skus={skus} go={go} />}
+          {tab === "opsboard" && <OpsBoard skus={skus} go={go} onAddPo={addPo} />}
+          {tab === "receiving" && <Receiving skus={skus} />}
+          {tab === "explorer" && <Explorer skus={skus} />}
+          {tab === "anomalies" && <Anomalies skus={skus} />}
+          {tab === "sources" && <DataSources />}
+          {tab === "model" && <SemanticModel />}
+          {tab === "pipeline" && <PipelineMonitor />}
+          {tab === "dictionary" && <DataDictionary />}
+          {tab === "api" && <ApiRef />}
         </main>
       </div>
 
