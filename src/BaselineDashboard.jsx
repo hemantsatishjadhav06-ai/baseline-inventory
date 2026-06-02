@@ -113,7 +113,7 @@ function buildSkus({ surge = 0, delay = 0 } = {}) {
     const margin = p.price > 0 ? (p.price - p.unitCost) / p.price : 0;
     const gmroi = stockValue > 0 ? (annualUnits * (p.price - p.unitCost)) / stockValue : 0;
     return {
-      ...p, forecastDaily, effLead, reorderWindow, targetMaxDays, cover, risk,
+      ...p, supplier: p.brand, forecastDaily, effLead, reorderWindow, targetMaxDays, cover, risk,
       suggestedQty: suggested, stockValue, protectedRev: forecastDaily * p.price * effLead,
       dailyRev, annualUnits, turns, margin, gmroi,
     };
@@ -663,6 +663,7 @@ function DeadStock({ skus }) {
   );
 }
 function AutoPO({ skus, poItems, approved, setApproved, budget, setBudget }) {
+  const [pay, setPay] = useState({});
   const result = useMemo(() => {
     const merged = {};
     skus.filter((s) => s.suggestedQty > 0).forEach((s) => (merged[s.sku] = { ...s, qty: s.suggestedQty }));
@@ -682,8 +683,14 @@ function AutoPO({ skus, poItems, approved, setApproved, budget, setBudget }) {
         {result.drafts.map((d) => { const ap = approved.includes(d.supplier); return (
           <div key={d.supplier} style={{ background: C.surface, borderRadius: 14, border: `1px solid ${ap ? C.success : C.border}`, overflow: "hidden" }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "14px 18px", background: ap ? C.success + "10" : C.surfaceAlt, borderBottom: `1px solid ${C.border}` }}>
-              <div><div style={{ fontSize: 15, fontWeight: 600, display: "flex", alignItems: "center", gap: 8 }}>{d.supplier}{ap ? <span style={{ fontSize: 11, color: C.success, display: "inline-flex", gap: 3 }}><Check size={13} /> Approved</span> : <span style={{ fontSize: 10, fontWeight: 600, color: C.opticInk, background: C.optic, padding: "2px 7px", borderRadius: 999 }}>SUGGESTED</span>}</div><div style={{ fontSize: 11, color: C.subtle }}>Lead {d.lead}d · {d.items.length} lines</div></div>
-              <div style={{ fontFamily: mono, fontSize: 18, fontWeight: 600 }}>{inrC(d.total)}</div>
+              <div><div style={{ fontSize: 15, fontWeight: 600, display: "flex", alignItems: "center", gap: 8 }}>{d.supplier}{ap ? <span style={{ fontSize: 11, color: C.success, display: "inline-flex", gap: 3 }}><Check size={13} /> Approved</span> : <span style={{ fontSize: 10, fontWeight: 600, color: C.opticInk, background: C.optic, padding: "2px 7px", borderRadius: 999 }}>SUGGESTED</span>}</div><div style={{ fontSize: 11, color: C.subtle }}>Lead {d.lead}d · {d.items.length} lines</div>
+                <select value={pay[d.supplier] || "prepaid"} onChange={(e) => setPay((p) => ({ ...p, [d.supplier]: e.target.value }))} style={{ marginTop: 6, fontSize: 11, border: `1px solid ${C.border}`, borderRadius: 6, padding: "3px 6px", color: C.muted, background: C.surface }}>
+                  <option value="prepaid">Prepaid</option><option value="credit">Credit (Net 30)</option><option value="foc">FOC — free of charge</option>
+                </select></div>
+              <div style={{ textAlign: "right" }}>
+                <div style={{ fontFamily: mono, fontSize: 18, fontWeight: 600, color: pay[d.supplier] === "foc" ? C.success : C.text }}>{pay[d.supplier] === "foc" ? "₹0" : inrC(d.total)}</div>
+                {pay[d.supplier] === "foc" && <span style={{ fontSize: 10, fontWeight: 600, color: C.success, background: C.success + "1A", borderRadius: 999, padding: "1px 7px" }}>FOC</span>}
+              </div>
             </div>
             <div style={{ padding: "6px 18px" }}>{d.items.map((s, i) => (
               <div key={s.sku} style={{ display: "flex", alignItems: "center", gap: 10, padding: "9px 0", borderBottom: i < d.items.length - 1 ? `1px solid ${C.border}` : "none", opacity: s._def ? 0.45 : 1 }}>
@@ -1157,6 +1164,100 @@ function Autopilot({ skus, agg, util, go, addPo, approved, setApproved }) {
   );
 }
 
+/* ============================ BRAND SALES ============================ */
+function BrandSales({ skus }) {
+  const [store, setStore] = useState("all");
+  const pool = store === "all" ? skus : skus.filter((s) => storesFor(s).includes(store));
+  const m = {};
+  pool.forEach((s) => { const b = (m[s.brand] = m[s.brand] || { brand: s.brand, skus: 0, rev: 0, val: 0, units: 0, disc: [] }); b.skus++; b.rev += s.dailyRev * 30; b.val += s.stockValue; b.units += s.forecastDaily * 30; b.disc.push(s.discount || 0); });
+  const rows = Object.values(m).map((b) => ({ ...b, disc: b.disc.reduce((a, c) => a + c, 0) / b.disc.length })).sort((a, b) => b.rev - a.rev);
+  const total = rows.reduce((a, b) => a + b.rev, 0);
+  const td = { padding: "11px 14px", fontSize: 13, borderTop: `1px solid ${C.border}` };
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10 }}>
+        <SourceBar inline />
+        <Segment value={store} onChange={setStore} options={[{ v: "all", l: "All stores" }, ...STORE_CODES.map((c) => ({ v: c, l: STORE_META[c].sport }))]} />
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 14 }}>
+        <Kpi label="Brands" value={rows.length} Icon={Award} />
+        <Kpi label="Top brand" value={rows[0]?.brand || "—"} Icon={TrendingUp} sub={rows[0] ? inrC(rows[0].rev) + "/mo" : ""} />
+        <Kpi label="Modeled monthly sales" value={inrC(total)} Icon={IndianRupee} sub="all brands" />
+        <Kpi label="Avg discount" value={pct(rows.reduce((a, b) => a + b.disc, 0) / (rows.length || 1) / 100)} Icon={TrendingDown} sub="live from Magento" />
+      </div>
+      <Card title="Brand sales (modeled) · discount is live" subtitle="revenue by brand — the catalog, brand and discount are real; velocity is modeled">
+        <div style={{ height: 260 }}>
+          <ResponsiveContainer width="100%" height="100%">
+            <BarChart data={rows.slice(0, 12)} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
+              <CartesianGrid strokeDasharray="3 3" stroke={C.border} vertical={false} />
+              <XAxis dataKey="brand" tick={{ fontSize: 10, fill: C.subtle }} axisLine={false} tickLine={false} interval={0} angle={-25} textAnchor="end" height={60} />
+              <YAxis tick={{ fontSize: 11, fill: C.subtle }} axisLine={false} tickLine={false} tickFormatter={(v) => "₹" + Math.round(v / 1e5) + "L"} width={50} />
+              <Tooltip content={<Tip fmt={inrC} />} cursor={{ fill: C.surfaceAlt }} />
+              <Bar dataKey="rev" name="Monthly sales" radius={[6, 6, 0, 0]}>{rows.slice(0, 12).map((e, i) => <Cell key={i} fill={catColors[i % catColors.length]} />)}</Bar>
+            </BarChart>
+          </ResponsiveContainer>
+        </div>
+      </Card>
+      <Card title="Brand breakdown" pad={0}>
+        <div style={{ overflowX: "auto" }}><table style={{ width: "100%", borderCollapse: "collapse" }}>
+          <thead><tr>{["Brand", "SKUs", "Monthly sales", "Units/mo", "Stock value", "Avg disc"].map((h, i) => <th key={h} style={{ textAlign: i === 0 ? "left" : "right", fontSize: 11, fontWeight: 600, textTransform: "uppercase", color: C.muted, padding: "11px 14px", background: C.surfaceAlt }}>{h}</th>)}</tr></thead>
+          <tbody>{rows.map((b) => (
+            <tr key={b.brand} onMouseEnter={(e) => (e.currentTarget.style.background = C.surfaceAlt)} onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}>
+              <td style={{ ...td, fontWeight: 500 }}>{b.brand}</td>
+              <td style={{ ...td, textAlign: "right", fontFamily: mono }}>{b.skus}</td>
+              <td style={{ ...td, textAlign: "right", fontFamily: mono, fontWeight: 600 }}>{inrC(b.rev)}</td>
+              <td style={{ ...td, textAlign: "right", fontFamily: mono }}>{Math.round(b.units)}</td>
+              <td style={{ ...td, textAlign: "right", fontFamily: mono }}>{inrC(b.val)}</td>
+              <td style={{ ...td, textAlign: "right", fontFamily: mono, color: C.clay }}>{Math.round(b.disc)}%</td>
+            </tr>
+          ))}</tbody>
+        </table></div>
+      </Card>
+    </div>
+  );
+}
+
+/* ============================ STORE SALES (per-store product sales) ============================ */
+function StoreSales({ skus }) {
+  const [store, setStore] = useState("tennisoutlet");
+  const members = skus.filter((s) => storesFor(s).includes(store));
+  const rows = members.map((s) => { const share = storesFor(s).length; return { ...s, sUnits: Math.round(s.forecastDaily * 30 / share), sRev: s.dailyRev * 30 / share }; })
+    .filter((s) => s.sRev > 0).sort((a, b) => b.sRev - a.sRev);
+  const rev = rows.reduce((a, s) => a + s.sRev, 0);
+  const td = { padding: "11px 14px", fontSize: 13, borderTop: `1px solid ${C.border}` };
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10 }}>
+        <SourceBar inline />
+        <Segment value={store} onChange={setStore} options={STORE_CODES.map((c) => ({ v: c, l: STORE_META[c].sport }))} />
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 14 }}>
+        <Kpi label={STORE_META[store].name + " · monthly sales"} value={inrC(rev)} Icon={IndianRupee} sub="modeled" />
+        <Kpi label="Products selling" value={rows.length} Icon={Package} />
+        <Kpi label="Units / month" value={Math.round(rows.reduce((a, s) => a + s.sUnits, 0)).toLocaleString("en-IN")} Icon={Boxes} />
+        <Kpi label="Top product" value={rows[0] ? inrC(rows[0].sRev) : "—"} Icon={TrendingUp} sub={rows[0]?.brand} />
+      </div>
+      <Card title={`${STORE_META[store].name} — product sales`} subtitle="modeled velocity · real prices & discounts from Magento" pad={0}>
+        <div style={{ overflowX: "auto" }}><table style={{ width: "100%", borderCollapse: "collapse" }}>
+          <thead><tr>{["#", "Product", "Brand", "Units", "Sale ₹", "MRP", "Disc", "Revenue"].map((h, i) => <th key={h} style={{ textAlign: i === 0 || i === 1 || i === 2 ? "left" : "right", fontSize: 11, fontWeight: 600, textTransform: "uppercase", color: C.muted, padding: "11px 14px", background: C.surfaceAlt }}>{h}</th>)}</tr></thead>
+          <tbody>{rows.slice(0, 25).map((s, i) => (
+            <tr key={s.sku} onMouseEnter={(e) => (e.currentTarget.style.background = C.surfaceAlt)} onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}>
+              <td style={{ ...td, fontFamily: mono, color: i < 3 ? C.clay : C.subtle, fontWeight: 600, width: 34 }}>{i + 1}</td>
+              <td style={td}><ProdLink s={s} /></td>
+              <td style={{ ...td, color: C.muted }}>{s.brand}</td>
+              <td style={{ ...td, textAlign: "right", fontFamily: mono, fontWeight: 600 }}>{s.sUnits}</td>
+              <td style={{ ...td, textAlign: "right", fontFamily: mono, fontWeight: 600 }}>{inr(s.price)}</td>
+              <td style={{ ...td, textAlign: "right", fontFamily: mono, color: C.subtle, textDecoration: s.discount ? "line-through" : "none" }}>{s.mrp ? inr(s.mrp) : "—"}</td>
+              <td style={{ ...td, textAlign: "right", fontFamily: mono, color: s.discount ? C.clay : C.subtle }}>{s.discount ? s.discount + "%" : "—"}</td>
+              <td style={{ ...td, textAlign: "right", fontFamily: mono, fontWeight: 600 }}>{inrC(s.sRev)}</td>
+            </tr>
+          ))}</tbody>
+        </table></div>
+      </Card>
+    </div>
+  );
+}
+
 /* ============================ COMMAND BAR (⌘K) ============================ */
 const CmdSection = ({ title }) => <div style={{ fontSize: 10, fontWeight: 600, textTransform: "uppercase", letterSpacing: ".04em", color: C.subtle, padding: "10px 10px 4px" }}>{title}</div>;
 function CmdRow({ icon: I, color, label, sub, onClick }) {
@@ -1217,10 +1318,10 @@ function NeedsNow({ skus, go }) {
 
 /* ============================ SHELL ============================ */
 const ROLES = {
-  exec: { label: "Executive & Leadership", tier: "Strategic", Icon: Crown, nav: ["ask", "executive", "autopilot", "sales", "group", "analytics", "insights"], home: "executive" },
-  manager: { label: "Department Manager", tier: "Tactical", Icon: Briefcase, nav: ["ask", "tactical", "autopilot", "group", "radar", "forecast", "po", "suppliers", "dead"], home: "tactical" },
+  exec: { label: "Executive & Leadership", tier: "Strategic", Icon: Crown, nav: ["ask", "executive", "autopilot", "sales", "brands", "group", "analytics", "insights"], home: "executive" },
+  manager: { label: "Department Manager", tier: "Tactical", Icon: Briefcase, nav: ["ask", "tactical", "autopilot", "group", "storesales", "brands", "radar", "forecast", "po", "suppliers", "dead"], home: "tactical" },
   ops: { label: "Operational Staff", tier: "Operational", Icon: ScanLine, nav: ["ask", "opsboard", "tasks", "receiving", "lookup"], home: "opsboard" },
-  analyst: { label: "Data & Business Analyst", tier: "Analytics", Icon: BarChart3, nav: ["ask", "explorer", "anomalies", "analytics", "insights"], home: "explorer" },
+  analyst: { label: "Data & Business Analyst", tier: "Analytics", Icon: BarChart3, nav: ["ask", "explorer", "brands", "anomalies", "analytics", "insights"], home: "explorer" },
   bi: { label: "BI Developer / Engineer", tier: "Platform", Icon: Database, nav: ["ask", "sources", "model", "pipeline", "dictionary", "api"], home: "sources" },
 };
 const VIEW_META = {
@@ -1230,6 +1331,7 @@ const VIEW_META = {
   radar: { label: "Stockout radar", Icon: Radar }, forecast: { label: "Forecast & what-if", Icon: Activity },
   po: { label: "Reorder / Auto-PO", Icon: ClipboardList }, suppliers: { label: "Suppliers", Icon: Award },
   group: { label: "Multi-sport group", Icon: Store }, autopilot: { label: "Autopilot", Icon: Zap }, dead: { label: "Dead stock", Icon: Snowflake },
+  brands: { label: "Brand sales", Icon: Award }, storesales: { label: "Store sales", Icon: Store },
   insights: { label: "AI insights", Icon: MessageSquare },
   opsboard: { label: "Operations board", Icon: Workflow }, tasks: { label: "My tasks", Icon: ClipboardList },
   receiving: { label: "Receiving", Icon: PackageCheck }, lookup: { label: "Product lookup", Icon: Search },
@@ -1333,6 +1435,8 @@ export default function BaselineDashboard() {
           {tab === "po" && <AutoPO skus={skus} poItems={poItems} approved={approved} setApproved={setApproved} budget={budget} setBudget={setBudget} />}
           {tab === "suppliers" && <Suppliers skus={skus} />}
           {tab === "group" && <GroupView skus={skus} onAddPo={addPo} />}
+          {tab === "brands" && <BrandSales skus={skus} />}
+          {tab === "storesales" && <StoreSales skus={skus} />}
           {tab === "autopilot" && <Autopilot skus={skus} agg={agg} util={util} go={go} addPo={addPo} approved={approved} setApproved={setApproved} />}
           {tab === "dead" && <DeadStock skus={skus} />}
           {tab === "insights" && <Insights skus={skus} agg={agg} util={util} role={role} go={go} />}
