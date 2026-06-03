@@ -1,0 +1,38 @@
+name: sync-data
+# Runs the analytics engine against Magento every 15 min on GitHub's runners (fast, no cold start)
+# and publishes data/live.json to the `data` branch. The static dashboard reads it directly.
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch: {}
+permissions:
+  contents: write
+concurrency:
+  group: sync-data
+  cancel-in-progress: true
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build live.json from Magento
+        env:
+          MAGENTO_BASE_URL: ${{ secrets.MAGENTO_BASE_URL }}
+          MG_CONSUMER_KEY: ${{ secrets.MG_CONSUMER_KEY }}
+          MG_CONSUMER_SECRET: ${{ secrets.MG_CONSUMER_SECRET }}
+          MG_ACCESS_TOKEN: ${{ secrets.MG_ACCESS_TOKEN }}
+          MG_ACCESS_TOKEN_SECRET: ${{ secrets.MG_ACCESS_TOKEN_SECRET }}
+        run: |
+          python3 scripts/build_live.py > /tmp/live.json
+          echo "bytes: $(wc -c < /tmp/live.json)"
+          python3 -c "import json;d=json.load(open('/tmp/live.json'));print('skus',d['count'],'today',d['sales']['today'])"
+      - name: Publish to data branch
+        run: |
+          git config user.name "baseline-bot"
+          git config user.email "bot@baseline.local"
+          git checkout --orphan data
+          git rm -rf . >/dev/null 2>&1 || true
+          cp /tmp/live.json live.json
+          git add live.json
+          git commit -m "data: live.json $(date -u +%FT%TZ)"
+          git push -f origin data
