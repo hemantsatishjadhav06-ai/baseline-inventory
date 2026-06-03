@@ -70,23 +70,29 @@ async function syncCatalog() {
   const out = []; const seen = new Set();
   for (const [cid, bucket] of Object.entries(CAT_IDS)) {
     try {
-      const data = await mg("/products", {
-        "searchCriteria[filterGroups][0][filters][0][field]": "category_id",
-        "searchCriteria[filterGroups][0][filters][0][value]": cid,
-        "searchCriteria[filterGroups][0][filters][0][conditionType]": "eq",
-        "searchCriteria[pageSize]": "60",
-        fields: "items[sku,name,price,status,type_id,extension_attributes[website_ids],custom_attributes]",
-      });
-      for (const p of data.items || []) {
-        if (!p.sku || seen.has(p.sku) || p.type_id !== "simple" || p.status !== 1) continue;
-        const price = Number(p.price || 0); if (price <= 0) continue;
-        seen.add(p.sku);
-        const ca = Object.fromEntries((p.custom_attributes || []).map((a) => [a.attribute_code, a.value]));
-        let sp = Number(ca.special_price); sp = sp && sp > 0 && sp < price ? sp : null;
-        const sale = sp || price;
-        const brand = brandMap[String(ca.brands)] || "House / Other";
-        const wsites = (p.extension_attributes?.website_ids || []).map((w) => WMAP[w]).filter(Boolean);
-        out.push({ sku: p.sku, name: p.name, category: bucket, brand, mrp: Math.round(price), price: Math.round(sale), discount: sale < price ? Math.round((1 - sale / price) * 100) : 0, wsites: wsites.length ? wsites : ["tennisoutlet"], leadTime: LEAD[brand] || 14, ...modelOps(p.sku, bucket, Math.round(sale)) });
+      let page = 1, got = 0;
+      while (page <= 8) {
+        const data = await mg("/products", {
+          "searchCriteria[filterGroups][0][filters][0][field]": "category_id",
+          "searchCriteria[filterGroups][0][filters][0][value]": cid,
+          "searchCriteria[filterGroups][0][filters][0][conditionType]": "eq",
+          "searchCriteria[pageSize]": "100", "searchCriteria[currentPage]": String(page),
+          fields: "total_count,items[sku,name,price,status,type_id,extension_attributes[website_ids],custom_attributes]",
+        });
+        const tc = data.total_count || 0;
+        for (const p of data.items || []) {
+          if (!p.sku || seen.has(p.sku) || p.type_id !== "simple" || p.status !== 1) continue;
+          const price = Number(p.price || 0); if (price <= 0) continue;
+          seen.add(p.sku);
+          const ca = Object.fromEntries((p.custom_attributes || []).map((a) => [a.attribute_code, a.value]));
+          let sp = Number(ca.special_price); sp = sp && sp > 0 && sp < price ? sp : null;
+          const sale = sp || price;
+          const brand = brandMap[String(ca.brands)] || "House / Other";
+          const wsites = (p.extension_attributes?.website_ids || []).map((w) => WMAP[w]).filter(Boolean);
+          out.push({ sku: p.sku, name: p.name, category: bucket, brand, mrp: Math.round(price), price: Math.round(sale), discount: sale < price ? Math.round((1 - sale / price) * 100) : 0, wsites: wsites.length ? wsites : ["tennisoutlet"], leadTime: LEAD[brand] || 14, ...modelOps(p.sku, bucket, Math.round(sale)) });
+        }
+        got += (data.items || []).length;
+        if (got >= tc || !(data.items || []).length) break; page++;
       }
     } catch (e) { state.errors.catalog = `cat ${cid}: ${e.status || e.message}`; }
   }
@@ -97,7 +103,7 @@ async function syncCatalog() {
 async function syncStock() {
   try {
     const map = {}; let page = 1;
-    while (page <= 20) {
+    while (page <= 40) {
       const d = await mg("/inventory/source-items", { "searchCriteria[pageSize]": "200", "searchCriteria[currentPage]": String(page) });
       for (const it of d.items || []) map[it.sku] = (map[it.sku] || 0) + Number(it.quantity || 0);
       const tc = d.total_count || 0; if (page * 200 >= tc || !(d.items || []).length) break; page++;

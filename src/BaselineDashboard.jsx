@@ -398,13 +398,13 @@ function Analytics({ skus }) {
       <SourceBar />
       <div style={{ display: "grid", gridTemplateColumns: "repeat(5,1fr)", gap: 14 }}>
         <Kpi label="Inventory turns" value={u.turns.toFixed(1) + "×"} delta={6} Icon={Repeat} sub="annualised" />
-        <Kpi label="GMROI" value={u.gmroi.toFixed(2)} delta={4} Icon={Gauge} sub="profit / ₹ stock" />
+        <Kpi label="GMROI (est.)" value={u.gmroi.toFixed(2)} delta={4} Icon={Gauge} sub="est. — no cost feed" />
         <Kpi label="Sell-through" value={pct(u.sellThrough)} delta={3} Icon={Activity} sub="30-day" />
         <Kpi label="Capital utilisation" value={pct(u.capitalUtil)} delta={-2} intent="neutral" tone={C.success} Icon={Wallet} sub="in healthy stock" />
         <Kpi label="Weeks of supply" value={u.weeksSupply.toFixed(1)} delta={0} Icon={CalendarDays} />
       </div>
       <div style={{ display: "grid", gridTemplateColumns: "1.4fr 1fr", gap: 18 }}>
-        <Card title="GMROI by category" subtitle="gross-margin return on inventory — higher means each rupee of stock works harder">
+        <Card title="GMROI by category (estimated)" subtitle="estimated — Magento exposes no product cost; based on assumed margin">
           <div style={{ height: 240 }}>
             <ResponsiveContainer width="100%" height="100%">
               <BarChart data={byCat} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
@@ -486,7 +486,7 @@ function Executive({ skus, agg, util, go }) {
       <div style={{ display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: 14 }}>
         <Kpi label="Sales today" value={inrC(agg.dayRev)} delta={8} Icon={IndianRupee} sub="modeled" />
         <Kpi label="This month" value={inrC(agg.monthRev)} delta={-4} Icon={TrendingUp} sub="off-season" />
-        <Kpi label="Gross margin" value={grossMargin + "%"} delta={2} Icon={Award} />
+        <Kpi label="Avg discount (live)" value={Math.round(skus.reduce((a, s) => a + (s.discount || 0), 0) / skus.length) + "%"} delta={2} Icon={TrendingDown} />
         <Kpi label="Inventory turns" value={util.turns.toFixed(1) + "×"} delta={6} Icon={Repeat} sub="capital efficiency" />
         <Kpi label="Cash in dead stock" value={inrC(deadValue)} delta={6} intent="negative" tone={C.dead} Icon={Snowflake} />
       </div>
@@ -658,7 +658,7 @@ function DeadStock({ skus }) {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
       <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 14 }}><Kpi label="Cash locked in slow stock" value={inrC(trapped)} tone={C.dead} Icon={Snowflake} /><Kpi label="Dead SKUs (no sale 90d+)" value={skus.filter((s) => s.risk === 4).length} tone={C.dead} Icon={Snowflake} /><Kpi label="Overstocked SKUs" value={skus.filter((s) => s.risk === 3).length} tone={C.overstock} Icon={Layers} /></div>
-      <Card title="Markdown & clearance candidates" subtitle="highest trapped cash first" pad={0}><OpsTable rows={rows} cols={["product", "risk", "age", "onhand", "gmroi", "value", "markdown"]} /></Card>
+      <Card title="Markdown & clearance candidates" subtitle="highest trapped cash first" pad={0}><OpsTable rows={rows} cols={["product", "risk", "age", "onhand", "value", "markdown"]} /></Card>
     </div>
   );
 }
