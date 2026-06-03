@@ -97,7 +97,7 @@ async function syncCatalog() {
 async function syncStock() {
   try {
     const map = {}; let page = 1;
-    while (page <= 40) {
+    while (page <= 20) {
       const d = await mg("/inventory/source-items", { "searchCriteria[pageSize]": "200", "searchCriteria[currentPage]": String(page) });
       for (const it of d.items || []) map[it.sku] = (map[it.sku] || 0) + Number(it.quantity || 0);
       const tc = d.total_count || 0; if (page * 200 >= tc || !(d.items || []).length) break; page++;
@@ -136,9 +136,9 @@ async function syncSales() {
 // Real per-SKU velocity + top sellers from actual order line items (last 45 days).
 async function syncOrders() {
   try {
-    const since = istDayStartUTC(45), t0 = istDayStartUTC(0), w0 = istDayStartUTC(7), m0 = istMonthStartUTC();
+    const since = istDayStartUTC(30), t0 = istDayStartUTC(0), w0 = istDayStartUTC(7), m0 = istMonthStartUTC();
     const bySku = {}; let page = 1, seen = 0;
-    while (page <= 50) {
+    while (page <= 18) {
       const d = await mg("/orders", { "searchCriteria[filterGroups][0][filters][0][field]": "created_at", "searchCriteria[filterGroups][0][filters][0][value]": since, "searchCriteria[filterGroups][0][filters][0][conditionType]": "gteq", "searchCriteria[pageSize]": "100", "searchCriteria[currentPage]": String(page), fields: "total_count,items[created_at,status,items[sku,name,qty_invoiced,qty_ordered,row_total]]" });
       const tc = d.total_count || 0;
       for (const o of d.items || []) {
@@ -164,16 +164,16 @@ async function syncOrders() {
 let syncing = false;
 async function runSync() {
   if (syncing) return; syncing = true;
-  try { await syncCatalog(); await syncStock(); await syncOrders(); await syncSales(); state.lastSync = new Date().toISOString(); }
+  try { await syncCatalog(); await syncSales(); await syncOrders(); await syncStock(); state.lastSync = new Date().toISOString(); }
   finally { syncing = false; }
 }
 const stale = () => !state.lastSync || Date.now() - new Date(state.lastSync).getTime() > SYNC_MS;
 
 app.get("/", (_q, res) => res.json({ ok: true, service: "baseline-api", auth: state.auth, lastSync: state.lastSync, catalogLive: state.catalogLive, salesLive: state.salesLive, stockLive: state.stockLive }));
 app.get("/api/health", (_q, res) => res.json({ ok: true, model: MODEL, auth: state.auth, lastSync: state.lastSync, catalogLive: state.catalogLive, salesLive: state.salesLive, stockLive: state.stockLive, ordersLive: state.ordersLive, totalProducts: state.totalProducts, count: state.skus.length, sales: state.sales, topSellers: { today: (state.topSellers.today || []).slice(0, 3) }, errors: state.errors }));
-app.get("/api/catalog", async (_q, res) => { if (stale()) await runSync().catch(() => { }); res.json({ source: { catalog: state.catalogLive ? "live" : "unavailable", stock: state.stockLive ? "live" : "modeled", sales: state.salesLive ? "live" : "modeled", velocity: state.ordersLive ? "live" : "modeled" }, lastSync: state.lastSync, totalProducts: state.totalProducts, count: state.skus.length, skus: state.skus }); });
-app.get("/api/topsellers", async (_q, res) => { if (stale()) await runSync().catch(() => { }); res.json({ available: state.ordersLive, lastSync: state.lastSync, ...state.topSellers }); });
-app.get("/api/sales", async (_q, res) => { if (stale()) await runSync().catch(() => { }); state.salesLive ? res.json({ available: true, ...state.sales, lastSync: state.lastSync }) : res.json({ available: false, reason: state.errors.sales || "not synced" }); });
+app.get("/api/catalog", async (_q, res) => { if (!state.lastSync && !syncing) await runSync().catch(() => {}); else if (stale() && !syncing) runSync().catch(() => {}); res.json({ source: { catalog: state.catalogLive ? "live" : "unavailable", stock: state.stockLive ? "live" : "modeled", sales: state.salesLive ? "live" : "modeled", velocity: state.ordersLive ? "live" : "modeled" }, lastSync: state.lastSync, totalProducts: state.totalProducts, count: state.skus.length, skus: state.skus }); });
+app.get("/api/topsellers", async (_q, res) => { if (!state.lastSync && !syncing) await runSync().catch(() => {}); else if (stale() && !syncing) runSync().catch(() => {}); res.json({ available: state.ordersLive, lastSync: state.lastSync, ...state.topSellers }); });
+app.get("/api/sales", async (_q, res) => { if (!state.lastSync && !syncing) await runSync().catch(() => {}); else if (stale() && !syncing) runSync().catch(() => {}); state.salesLive ? res.json({ available: true, ...state.sales, lastSync: state.lastSync }) : res.json({ available: false, reason: state.errors.sales || "not synced" }); });
 app.post("/api/sync", async (_q, res) => { await runSync(); res.json({ ok: true, lastSync: state.lastSync, count: state.skus.length, salesLive: state.salesLive, stockLive: state.stockLive, sales: state.sales }); });
 
 app.post("/api/chat", async (req, res) => {
