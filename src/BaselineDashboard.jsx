@@ -148,6 +148,14 @@ function topSellers(skus, periodDays) {
     .map((s) => ({ ...s, periodRev: s.dailyRev * periodDays, periodUnits: Math.round(s.avgDaily * seasonIdx(s.category) * periodDays) }))
     .sort((a, b) => b.periodRev - a.periodRev).slice(0, 10);
 }
+// Use exact backend top sellers (real order revenue) when available; map to display shape.
+function realTopFor(realTop, days, skus) {
+  const key = days === 1 ? "today" : days === 7 ? "week" : days === 365 ? "all" : "month";
+  const arr = realTop && realTop[key];
+  if (!arr || !arr.length) return null;
+  const m = Object.fromEntries(skus.map((s) => [s.sku, s]));
+  return arr.map((t) => { const s = m[t.sku] || {}; return { sku: t.sku, name: t.name, category: s.category || "—", supplier: s.brand || s.supplier || "", periodUnits: t.units, periodRev: t.revenue }; });
+}
 
 /* ============================ PRIMITIVES ============================ */
 const RiskBadge = ({ level }) => { const r = RISK[level]; return (
@@ -472,12 +480,12 @@ function StoreCompare({ skus }) {
 }
 
 /* ============================ EXEC / SALES / PROCUREMENT / EMPLOYEE ============================ */
-function Executive({ skus, agg, util, go }) {
+function Executive({ skus, agg, util, go, realTop }) {
   const [tsPeriod, setTsPeriod] = useState(30);
   const invValue = skus.reduce((a, s) => a + s.stockValue, 0);
   const deadValue = skus.filter((s) => s.risk === 4).reduce((a, s) => a + s.stockValue, 0);
   const grossMargin = Math.round(skus.reduce((a, s) => a + s.margin, 0) / skus.length * 100);
-  const top = topSellers(skus, tsPeriod);
+  const top = realTopFor(realTop, tsPeriod, skus) || topSellers(skus, tsPeriod);
   const insights = buildInsights(skus, agg, util, "exec");
   const catRev = Object.entries(skus.reduce((m, s) => ((m[s.category] = (m[s.category] || 0) + s.dailyRev * 30), m), {})).map(([name, value]) => ({ name, value })).sort((a, b) => b.value - a.value);
   return (
@@ -539,9 +547,9 @@ function Executive({ skus, agg, util, go }) {
   );
 }
 
-function Sales({ skus, agg }) {
+function Sales({ skus, agg, realTop }) {
   const [period, setPeriod] = useState(30);
-  const top = topSellers(skus, period);
+  const top = realTopFor(realTop, period, skus) || topSellers(skus, period);
   const series = period === 1 ? agg.days.map((d) => ({ x: "D" + d.d, rev: d.rev })) : period === 365 ? agg.months.map((m) => ({ x: m.m, rev: m.rev })) : period === 7 ? agg.weeks.slice(-8).map((w) => ({ x: w.w, rev: w.rev / 7 })) : agg.weeks.map((w) => ({ x: w.w, rev: w.rev }));
   const periodRev = period === 1 ? agg.dayRev : period === 7 ? agg.weekRev : period === 365 ? agg.yearRev : agg.monthRev;
   const lbl = period === 1 ? "today" : period === 7 ? "this week" : period === 365 ? "this year" : "this month";
@@ -1364,12 +1372,14 @@ export default function BaselineDashboard() {
 
   const [liveSkus, setLiveSkus] = useState(CATALOG_SKUS);
   const [realSales, setRealSales] = useState(null);
+  const [realTop, setRealTop] = useState(null);
   const [sync, setSync] = useState({ live: false, lastSync: null, salesLive: false });
   useEffect(() => {
     fetch(API_BASE + "/api/catalog").then((r) => r.json()).then((d) => {
       if (d?.skus?.length) { setLiveSkus(d.skus); setSync((s) => ({ ...s, live: d.source?.catalog === "live", lastSync: d.lastSync, salesLive: d.source?.sales === "live" })); }
     }).catch(() => {});
     fetch(API_BASE + "/api/sales").then((r) => r.json()).then((d) => { if (d?.available) setRealSales(d); }).catch(() => {});
+    fetch(API_BASE + "/api/topsellers").then((r) => r.json()).then((d) => { if (d?.available) setRealTop(d); }).catch(() => {});
   }, []);
   const skus = useMemo(() => buildSkus(liveSkus, { surge, delay }), [liveSkus, surge, delay]);
   const baseAgg = useMemo(() => salesAgg(skus), [skus]);
@@ -1438,8 +1448,8 @@ export default function BaselineDashboard() {
         <main style={{ flex: 1, overflowY: "auto", padding: 24 }}>
           {tab === ROLES[role].home && tab !== "ask" && <NeedsNow skus={skus} go={go} />}
           {tab === "ask" && <AskBaseline skus={skus} agg={agg} util={util} role={role} />}
-          {tab === "executive" && <Executive skus={skus} agg={agg} util={util} go={go} />}
-          {tab === "sales" && <Sales skus={skus} agg={agg} />}
+          {tab === "executive" && <Executive skus={skus} agg={agg} util={util} go={go} realTop={realTop} />}
+          {tab === "sales" && <Sales skus={skus} agg={agg} realTop={realTop} />}
           {tab === "analytics" && <Analytics skus={skus} />}
           {tab === "radar" && <StockoutRadar skus={skus} onAddPo={addPo} />}
           {tab === "forecast" && <ForecastWhatIf surge={surge} setSurge={setSurge} delay={delay} setDelay={setDelay} skus={skus} />}
