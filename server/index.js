@@ -103,7 +103,7 @@ async function syncCatalog() {
 async function syncStock() {
   try {
     const map = {}; let page = 1;
-    while (page <= 40) {
+    while (page <= 18) {
       const d = await mg("/inventory/source-items", { "searchCriteria[pageSize]": "200", "searchCriteria[currentPage]": String(page) });
       for (const it of d.items || []) map[it.sku] = (map[it.sku] || 0) + Number(it.quantity || 0);
       const tc = d.total_count || 0; if (page * 200 >= tc || !(d.items || []).length) break; page++;
@@ -162,8 +162,8 @@ async function aggPeriod(since, cap) {
 const topOf = (agg) => Object.values(agg).filter((x) => x.r > 0).sort((a, b) => b.r - a.r).slice(0, 12).map((x) => ({ sku: x.sku, name: x.name, units: Math.round(x.u), revenue: Math.round(x.r) }));
 async function syncOrders() {
   try {
-    const l30 = await aggPeriod(istDayStartUTC(30), 18);
-    const wk = await aggPeriod(istDayStartUTC(7), 8);
+    const l30 = await aggPeriod(istDayStartUTC(30), 10);
+    const wk = await aggPeriod(istDayStartUTC(7), 6);
     const td = await aggPeriod(istDayStartUTC(0), 3);
     for (const s of state.skus) { const a = l30[s.sku]; if (a) { s.avgDaily = +(a.u / 30).toFixed(2); s.daysSinceSale = wk[s.sku] ? 2 : 20; } else { s.avgDaily = 0; s.daysSinceSale = 999; } }
     state.topSellers = { today: topOf(td), week: topOf(wk), month: topOf(l30), all: topOf(l30) };
