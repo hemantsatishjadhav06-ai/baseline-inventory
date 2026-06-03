@@ -109,7 +109,7 @@ function buildSkus(source, { surge = 0, delay = 0 } = {}) {
     if (risk === 3 || risk === 4) suggested = 0;
     const dailyRev = p.avgDaily * seasonIdx(p.category) * p.price;
     const annualUnits = p.avgDaily * SEASON[p.category].reduce((x, y) => x + y, 0) / 12 * 365;
-    const stockValue = p.onHand * p.unitCost;
+    const stockValue = p.onHand * p.price; // retail value (real: real on-hand × real price)
     const turns = stockValue > 0 ? (annualUnits * p.unitCost) / stockValue : 0;
     const margin = p.price > 0 ? (p.price - p.unitCost) / p.price : 0;
     const gmroi = stockValue > 0 ? (annualUnits * (p.price - p.unitCost)) / stockValue : 0;
@@ -230,7 +230,7 @@ function SkuDrawer({ s, onClose, onAddPo }) {
         </div>
         <div style={{ padding: 22, display: "flex", flexDirection: "column", gap: 18 }}>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 10 }}>
-            {[["On hand", s.onHand + (s.inTransit ? ` +${s.inTransit}` : ""), C.text], ["Days cover", isFinite(s.cover) ? Math.round(s.cover) + "d" : "—", RISK[s.risk].color], ["Price", inr(s.price), C.text], ["Margin", pct(s.margin), C.success], ["Forecast/day", s.forecastDaily.toFixed(2), C.text], ["Accuracy", pct(s.accuracy), s.accuracy >= .9 ? C.success : C.warning]].map(([l, v, c]) => (
+            {[["On hand", s.onHand + (s.inTransit ? ` +${s.inTransit}` : ""), C.text], ["Days cover", isFinite(s.cover) ? Math.round(s.cover) + "d" : "—", RISK[s.risk].color], ["Sale price", inr(s.price), C.text], ["MRP", s.mrp ? inr(s.mrp) : "—", C.subtle], ["Discount", (s.discount || 0) + "%", C.clay], ["Run-rate/day", (s.avgDaily || 0).toFixed(2), C.text]].map(([l, v, c]) => (
               <div key={l} style={{ background: C.surfaceAlt, borderRadius: 10, padding: "10px 12px" }}><div style={{ fontSize: 10, color: C.muted, textTransform: "uppercase", letterSpacing: ".03em" }}>{l}</div><div style={{ fontFamily: mono, fontSize: 16, fontWeight: 600, color: c, marginTop: 3 }}>{v}</div></div>
             ))}
           </div>
@@ -497,10 +497,10 @@ function Executive({ skus, agg, util, go, realTop }) {
         <Kpi label="This month" value={inrC(agg.monthRev)} delta={-4} Icon={TrendingUp} sub="off-season" />
         <Kpi label="Avg discount (live)" value={Math.round(skus.reduce((a, s) => a + (s.discount || 0), 0) / skus.length) + "%"} delta={2} Icon={TrendingDown} />
         <Kpi label="Inventory turns" value={util.turns.toFixed(1) + "×"} delta={6} Icon={Repeat} sub="capital efficiency" />
-        <Kpi label="Cash in dead stock" value={inrC(deadValue)} delta={6} intent="negative" tone={C.dead} Icon={Snowflake} />
+        <Kpi label="Dead stock (retail value)" value={inrC(deadValue)} delta={6} intent="negative" tone={C.dead} Icon={Snowflake} />
       </div>
       <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr", gap: 18 }}>
-        <Card title="Revenue — 12-month seasonal view" subtitle="modeled from live catalog · tennis-calendar shape">
+        <Card title="Revenue projection (illustrative)" subtitle="shape only — not actual monthly revenue; see KPIs above for real totals">
           <div style={{ height: 240 }}>
             <ResponsiveContainer width="100%" height="100%">
               <AreaChart data={agg.months} margin={{ top: 8, right: 8, left: 8, bottom: 0 }}>
@@ -564,7 +564,7 @@ function Sales({ skus, agg, realTop }) {
         <Kpi label="Avg order value" value={inr(2400)} delta={3} Icon={Wallet} />
         <Kpi label="Units sold" value={top.reduce((a, s) => a + s.periodUnits, 0).toLocaleString("en-IN") + "+"} delta={4} Icon={Boxes} />
       </div>
-      <Card title="Revenue trend">
+      <Card title="Revenue trend (projection)" subtitle="illustrative shape — real totals in the KPIs above">
         <div style={{ height: 230 }}>
           <ResponsiveContainer width="100%" height="100%">
             <LineChart data={series} margin={{ top: 8, right: 8, left: 8, bottom: 0 }}>
@@ -622,7 +622,7 @@ function OpsTable({ rows, onAddPo, cols }) {
 }
 function StockoutRadar({ skus, onAddPo }) {
   const rows = useMemo(() => skus.filter((s) => s.risk <= 1).sort((a, b) => a.cover - b.cover), [skus]);
-  return <Card title={`Stockout radar — ${rows.length} SKUs need attention`} subtitle="ranked by forecasted days of cover · click a product for SKU 360" pad={0}><OpsTable rows={rows} onAddPo={onAddPo} cols={["product", "risk", "cover", "acc", "onhand", "suggest", "action"]} /></Card>;
+  return <Card title={`Stockout radar — ${rows.length} SKUs need attention`} subtitle="ranked by forecasted days of cover · click a product for SKU 360" pad={0}><OpsTable rows={rows} onAddPo={onAddPo} cols={["product", "risk", "cover", "onhand", "suggest", "action"]} /></Card>;
 }
 function Suppliers({ skus }) {
   const map = {};
@@ -633,7 +633,7 @@ function Suppliers({ skus }) {
   return (
     <Card title="Supplier scorecard" subtitle="reliability, spend and open orders by vendor" pad={0}>
       <div style={{ overflowX: "auto" }}><table style={{ width: "100%", borderCollapse: "collapse" }}>
-        <thead><tr>{["Supplier", "SKUs", "Lead", "OTIF", "Stock value", "Suggested order"].map((h, i) => <th key={h} style={{ textAlign: i === 0 ? "left" : "right", fontSize: 11, fontWeight: 600, textTransform: "uppercase", color: C.muted, padding: "11px 14px", background: C.surfaceAlt }}>{h}</th>)}</tr></thead>
+        <thead><tr>{["Supplier", "SKUs", "Lead", "OTIF (est.)", "Stock value", "Suggested order"].map((h, i) => <th key={h} style={{ textAlign: i === 0 ? "left" : "right", fontSize: 11, fontWeight: 600, textTransform: "uppercase", color: C.muted, padding: "11px 14px", background: C.surfaceAlt }}>{h}</th>)}</tr></thead>
         <tbody>{rows.map((m) => (
           <tr key={m.supplier} onMouseEnter={(e) => (e.currentTarget.style.background = C.surfaceAlt)} onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}>
             <td style={{ ...td, fontWeight: 500 }}>{m.supplier}</td><td style={{ ...td, textAlign: "right", fontFamily: mono }}>{m.skus}</td><td style={{ ...td, textAlign: "right", fontFamily: mono }}>{m.lead}d</td>
@@ -657,7 +657,7 @@ function ForecastWhatIf({ surge, setSurge, delay, setDelay, skus }) {
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 24, marginBottom: 8 }}><S label="Demand surge" hint="e.g. tournament / season start" value={surge} min={0} max={100} step={5} unit="%" onChange={setSurge} color={C.clay} /><S label="Supplier delay" hint="added to every lead time" value={delay} min={0} max={21} step={1} unit="d" onChange={setDelay} color={C.warning} /></div>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 14, marginTop: 12 }}><Kpi label="SKUs at risk" value={atRisk} tone={atRisk > 20 ? C.danger : C.warning} Icon={AlertTriangle} sub="this scenario" /><Kpi label="Revenue exposed" value={inrC(revAtRisk)} tone={C.danger} Icon={IndianRupee} /><Kpi label="Scenario" value={surge === 0 && delay === 0 ? "Baseline" : "Stressed"} Icon={Activity} sub={`+${surge}% · +${delay}d`} /></div>
       </Card>
-      <Card title="Highest revenue at risk" subtitle="forecast demand × price × lead time" pad={0}><OpsTable rows={top} cols={["product", "risk", "cover", "acc", "onhand"]} /></Card>
+      <Card title="Highest revenue at risk" subtitle="30-day run-rate × price × lead time" pad={0}><OpsTable rows={top} cols={["product", "risk", "cover", "onhand"]} /></Card>
     </div>
   );
 }
@@ -666,7 +666,7 @@ function DeadStock({ skus }) {
   const trapped = skus.filter((s) => s.risk === 4 || s.risk === 3).reduce((a, s) => a + s.stockValue, 0);
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 14 }}><Kpi label="Cash locked in slow stock" value={inrC(trapped)} tone={C.dead} Icon={Snowflake} /><Kpi label="Dead SKUs (no sale 90d+)" value={skus.filter((s) => s.risk === 4).length} tone={C.dead} Icon={Snowflake} /><Kpi label="Overstocked SKUs" value={skus.filter((s) => s.risk === 3).length} tone={C.overstock} Icon={Layers} /></div>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 14 }}><Kpi label="Slow stock (retail value)" value={inrC(trapped)} tone={C.dead} Icon={Snowflake} /><Kpi label="Dead SKUs (no sale 90d+)" value={skus.filter((s) => s.risk === 4).length} tone={C.dead} Icon={Snowflake} /><Kpi label="Overstocked SKUs" value={skus.filter((s) => s.risk === 3).length} tone={C.overstock} Icon={Layers} /></div>
       <Card title="Markdown & clearance candidates" subtitle="highest trapped cash first" pad={0}><OpsTable rows={rows} cols={["product", "risk", "age", "onhand", "value", "markdown"]} /></Card>
     </div>
   );
@@ -1085,7 +1085,7 @@ function GroupView({ skus, onAddPo }) {
             <div style={{ display: "flex", alignItems: "center", gap: 8 }}><Store size={15} color={C.blue} /><span style={{ fontSize: 14, fontWeight: 600 }}>{s.name}</span><span style={{ marginLeft: "auto", fontSize: 10, fontWeight: 600, color: C.muted, background: C.surfaceAlt, borderRadius: 999, padding: "2px 8px" }}>{s.sport}</span></div>
             <div style={{ display: "flex", gap: 16, marginTop: 12 }}>
               <div><div style={{ fontSize: 10, color: C.muted, textTransform: "uppercase" }}>Stock value</div><div style={{ fontFamily: mono, fontSize: 16, fontWeight: 600 }}>{inrC(s.stockVal)}</div></div>
-              <div><div style={{ fontSize: 10, color: C.muted, textTransform: "uppercase" }}>Monthly rev</div><div style={{ fontFamily: mono, fontSize: 16, fontWeight: 600 }}>{inrC(s.rev)}</div></div>
+              <div><div style={{ fontSize: 10, color: C.muted, textTransform: "uppercase" }}>Monthly rev (est.)</div><div style={{ fontFamily: mono, fontSize: 16, fontWeight: 600 }}>{inrC(s.rev)}</div></div>
             </div>
             <div style={{ fontSize: 12, color: s.atRisk ? C.danger : C.subtle, marginTop: 10 }}>{s.products} SKUs · {s.atRisk ? s.atRisk + " at risk" : "all healthy"}</div>
           </div>
