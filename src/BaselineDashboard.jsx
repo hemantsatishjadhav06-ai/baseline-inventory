@@ -1376,25 +1376,31 @@ export default function BaselineDashboard() {
   const [realTop, setRealTop] = useState(null);
   const [sync, setSync] = useState({ live: false, lastSync: null, salesLive: false });
   useEffect(() => {
-    const useData = (d) => {
+    const apply = (d, ts) => {
       if (!d?.skus?.length) return false;
       setLiveSkus(d.skus);
-      setSync({ live: true, lastSync: d.generatedAt || d.lastSync, salesLive: !!(d.sales?.available || d.source?.sales === "live") });
+      setSync({ live: true, lastSync: ts || d.generatedAt || d.lastSync, salesLive: !!(d.sales?.available || d.source?.sales === "live") });
       if (d.sales?.available) setRealSales(d.sales);
       if (d.topSellers?.available) setRealTop(d.topSellers);
       return true;
     };
-    // Primary: static live.json (GitHub Actions pipeline — always fresh, no cold start)
-    fetch(LIVE_JSON, { cache: "no-store" }).then((r) => r.json()).then((d) => {
-      if (!useData(d)) throw new Error("empty");
-    }).catch(() => {
-      // Fallback: live backend API
-      fetch(API_BASE + "/api/catalog").then((r) => r.json()).then((d) => {
-        if (d?.skus?.length) { setLiveSkus(d.skus); setSync((s) => ({ ...s, live: d.source?.catalog === "live", lastSync: d.lastSync, salesLive: d.source?.sales === "live" })); }
+    // 1) Instant load: static snapshot (always available, no cold start)
+    fetch(LIVE_JSON, { cache: "no-store" }).then((r) => r.json()).then((d) => apply(d, d.generatedAt)).catch(() => {});
+    // 2) Live refresh: pull the backend now and every 5 min (overrides snapshot with current Magento data)
+    const pullLive = () => {
+      Promise.all([
+        fetch(API_BASE + "/api/catalog", { cache: "no-store" }).then((r) => r.json()).catch(() => null),
+        fetch(API_BASE + "/api/sales", { cache: "no-store" }).then((r) => r.json()).catch(() => null),
+        fetch(API_BASE + "/api/topsellers", { cache: "no-store" }).then((r) => r.json()).catch(() => null),
+      ]).then(([cat, sales, top]) => {
+        if (cat?.skus?.length) { setLiveSkus(cat.skus); setSync({ live: true, lastSync: cat.lastSync, salesLive: cat.source?.sales === "live" }); }
+        if (sales?.available) setRealSales(sales);
+        if (top?.available) setRealTop(top);
       }).catch(() => {});
-      fetch(API_BASE + "/api/sales").then((r) => r.json()).then((d) => { if (d?.available) setRealSales(d); }).catch(() => {});
-      fetch(API_BASE + "/api/topsellers").then((r) => r.json()).then((d) => { if (d?.available) setRealTop(d); }).catch(() => {});
-    });
+    };
+    pullLive();
+    const id = setInterval(pullLive, 5 * 60 * 1000);
+    return () => clearInterval(id);
   }, []);
   const skus = useMemo(() => buildSkus(liveSkus, { surge, delay }), [liveSkus, surge, delay]);
   const baseAgg = useMemo(() => salesAgg(skus), [skus]);
@@ -1436,7 +1442,7 @@ export default function BaselineDashboard() {
         <header style={{ display: "flex", alignItems: "center", gap: 14, padding: "14px 24px", background: C.surface, borderBottom: `1px solid ${C.border}` }}>
           <h1 style={{ fontSize: 18, fontWeight: 600, margin: 0 }}>{VIEW_META[tab].label}</h1>
           <span style={{ fontSize: 11, fontWeight: 600, color: C.muted, background: C.surfaceAlt, border: `1px solid ${C.border}`, borderRadius: 999, padding: "3px 10px" }}>{ROLES[role].tier} · {ROLES[role].label}</span>
-          {sync.live && <span title={sync.lastSync ? "synced " + new Date(sync.lastSync).toLocaleTimeString() : ""} style={{ fontSize: 11, fontWeight: 600, color: C.success, display: "inline-flex", alignItems: "center", gap: 5 }}><span style={{ width: 6, height: 6, borderRadius: 999, background: C.success }} /> Live{sync.salesLive ? " · sales" : " catalog"}</span>}
+          {sync.live && <span style={{ fontSize: 11, fontWeight: 600, color: C.success, display: "inline-flex", alignItems: "center", gap: 5 }}><span style={{ width: 6, height: 6, borderRadius: 999, background: C.success }} /> Live · updated {sync.lastSync ? new Date(sync.lastSync).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "—"}</span>}
           <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 10 }}>
             <button onClick={() => setCmdOpen(true)} style={{ ...btnGhost, display: "inline-flex", alignItems: "center", gap: 7, padding: "8px 12px", color: C.muted }}><Search size={14} /> Search <span style={{ fontSize: 10, fontWeight: 600, border: `1px solid ${C.borderStrong}`, borderRadius: 5, padding: "1px 5px", color: C.subtle }}>⌘K</span></button>
             <button onClick={() => setTab("ask")} style={{ ...btnGhost, display: "inline-flex", alignItems: "center", gap: 6, padding: "8px 12px", color: C.purple, borderColor: C.purple + "44" }}><Sparkles size={15} /> Ask Baseline</button>
