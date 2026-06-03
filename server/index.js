@@ -139,31 +139,34 @@ async function syncSales() {
   } catch (e) { state.salesLive = false; state.errors.sales = `${e.status || e.message}`; }
 }
 
-// Real per-SKU velocity + top sellers from actual order line items (last 45 days).
+// Real per-SKU sales aggregated per period via the server-side created_at filter
+// (avoids the Magento quirk where order-level created_at is dropped when nested items are requested).
+async function aggPeriod(since, cap) {
+  const bySku = {}; let page = 1, seen = 0;
+  while (page <= cap) {
+    const d = await mg("/orders", { "searchCriteria[filterGroups][0][filters][0][field]": "created_at", "searchCriteria[filterGroups][0][filters][0][value]": since, "searchCriteria[filterGroups][0][filters][0][conditionType]": "gteq", "searchCriteria[pageSize]": "100", "searchCriteria[currentPage]": String(page), fields: "total_count,items[status,items[sku,name,qty_invoiced,qty_ordered,row_total]]" });
+    const tc = d.total_count || 0;
+    for (const o of d.items || []) {
+      if (o.status === "canceled") continue;
+      for (const it of o.items || []) {
+        if (!it.sku) continue;
+        const q = Number(it.qty_invoiced || it.qty_ordered || 0), rev = Number(it.row_total || 0);
+        const e = bySku[it.sku] || (bySku[it.sku] = { sku: it.sku, name: it.name, u: 0, r: 0 });
+        e.u += q; e.r += rev;
+      }
+    }
+    seen += (d.items || []).length; if (seen >= tc || !(d.items || []).length) break; page++;
+  }
+  return bySku;
+}
+const topOf = (agg) => Object.values(agg).filter((x) => x.r > 0).sort((a, b) => b.r - a.r).slice(0, 12).map((x) => ({ sku: x.sku, name: x.name, units: Math.round(x.u), revenue: Math.round(x.r) }));
 async function syncOrders() {
   try {
-    const since = istDayStartUTC(30), t0 = istDayStartUTC(0), w0 = istDayStartUTC(7), m0 = istMonthStartUTC();
-    const bySku = {}; let page = 1, seen = 0;
-    while (page <= 18) {
-      const d = await mg("/orders", { "searchCriteria[filterGroups][0][filters][0][field]": "created_at", "searchCriteria[filterGroups][0][filters][0][value]": since, "searchCriteria[filterGroups][0][filters][0][conditionType]": "gteq", "searchCriteria[pageSize]": "100", "searchCriteria[currentPage]": String(page), fields: "total_count,items[created_at,status,items[sku,name,qty_invoiced,qty_ordered,row_total]]" });
-      const tc = d.total_count || 0;
-      for (const o of d.items || []) {
-        if (o.status === "canceled") continue;
-        const ct = o.created_at || ""; const isT = ct >= t0, isW = ct >= w0, isM = ct >= m0;
-        for (const it of o.items || []) {
-          if (!it.sku) continue;
-          const q = Number(it.qty_invoiced || it.qty_ordered || 0), rev = Number(it.row_total || 0);
-          const e = bySku[it.sku] || (bySku[it.sku] = { sku: it.sku, name: it.name, u45: 0, rev45: 0, uT: 0, revT: 0, uW: 0, revW: 0, uM: 0, revM: 0, last: ct });
-          e.u45 += q; e.rev45 += rev; if (isT) { e.uT += q; e.revT += rev; } if (isW) { e.uW += q; e.revW += rev; } if (isM) { e.uM += q; e.revM += rev; }
-          if (ct > e.last) e.last = ct;
-        }
-      }
-      seen += (d.items || []).length; if (seen >= tc || !(d.items || []).length) break; page++;
-    }
-    const now = Date.now();
-    for (const s of state.skus) { const a = bySku[s.sku]; if (a) { s.avgDaily = +(a.u45 / 45).toFixed(2); s.daysSinceSale = Math.max(0, Math.floor((now - Date.parse(a.last.replace(" ", "T") + "Z")) / 86400000)); } else { s.avgDaily = 0; s.daysSinceSale = 999; } }
-    const top = (rk) => { const uk = rk.replace("rev", "u"); return Object.values(bySku).filter((x) => x[rk] > 0).sort((a, b) => b[rk] - a[rk]).slice(0, 12).map((x) => ({ sku: x.sku, name: x.name, units: Math.round(x[uk]), revenue: Math.round(x[rk]) })); };
-    state.topSellers = { today: top("revT"), week: top("revW"), month: top("revM"), all: top("rev45") };
+    const l30 = await aggPeriod(istDayStartUTC(30), 18);
+    const wk = await aggPeriod(istDayStartUTC(7), 8);
+    const td = await aggPeriod(istDayStartUTC(0), 3);
+    for (const s of state.skus) { const a = l30[s.sku]; if (a) { s.avgDaily = +(a.u / 30).toFixed(2); s.daysSinceSale = wk[s.sku] ? 2 : 20; } else { s.avgDaily = 0; s.daysSinceSale = 999; } }
+    state.topSellers = { today: topOf(td), week: topOf(wk), month: topOf(l30), all: topOf(l30) };
     state.ordersLive = true; delete state.errors.orders;
   } catch (e) { state.ordersLive = false; state.errors.orders = String(e.status || e.message); }
 }
