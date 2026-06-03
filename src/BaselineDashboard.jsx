@@ -28,6 +28,7 @@ const inr = (n) => "₹" + Math.round(n).toLocaleString("en-IN");
 const inrC = (n) => n >= 1e7 ? "₹" + (n / 1e7).toFixed(2) + " Cr" : n >= 1e5 ? "₹" + (n / 1e5).toFixed(2) + " L" : inr(n);
 const pct = (x) => Math.round(x * 100) + "%";
 const API_BASE = "https://baseline-api-hbul.onrender.com";
+const LIVE_JSON = "https://raw.githubusercontent.com/hemantsatishjadhav06-ai/baseline-inventory/data/live.json";
 function downloadCSV(filename, rows) {
   const csv = rows.map((r) => r.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(",")).join("\n");
   const u = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));
@@ -1375,11 +1376,25 @@ export default function BaselineDashboard() {
   const [realTop, setRealTop] = useState(null);
   const [sync, setSync] = useState({ live: false, lastSync: null, salesLive: false });
   useEffect(() => {
-    fetch(API_BASE + "/api/catalog").then((r) => r.json()).then((d) => {
-      if (d?.skus?.length) { setLiveSkus(d.skus); setSync((s) => ({ ...s, live: d.source?.catalog === "live", lastSync: d.lastSync, salesLive: d.source?.sales === "live" })); }
-    }).catch(() => {});
-    fetch(API_BASE + "/api/sales").then((r) => r.json()).then((d) => { if (d?.available) setRealSales(d); }).catch(() => {});
-    fetch(API_BASE + "/api/topsellers").then((r) => r.json()).then((d) => { if (d?.available) setRealTop(d); }).catch(() => {});
+    const useData = (d) => {
+      if (!d?.skus?.length) return false;
+      setLiveSkus(d.skus);
+      setSync({ live: true, lastSync: d.generatedAt || d.lastSync, salesLive: !!(d.sales?.available || d.source?.sales === "live") });
+      if (d.sales?.available) setRealSales(d.sales);
+      if (d.topSellers?.available) setRealTop(d.topSellers);
+      return true;
+    };
+    // Primary: static live.json (GitHub Actions pipeline — always fresh, no cold start)
+    fetch(LIVE_JSON, { cache: "no-store" }).then((r) => r.json()).then((d) => {
+      if (!useData(d)) throw new Error("empty");
+    }).catch(() => {
+      // Fallback: live backend API
+      fetch(API_BASE + "/api/catalog").then((r) => r.json()).then((d) => {
+        if (d?.skus?.length) { setLiveSkus(d.skus); setSync((s) => ({ ...s, live: d.source?.catalog === "live", lastSync: d.lastSync, salesLive: d.source?.sales === "live" })); }
+      }).catch(() => {});
+      fetch(API_BASE + "/api/sales").then((r) => r.json()).then((d) => { if (d?.available) setRealSales(d); }).catch(() => {});
+      fetch(API_BASE + "/api/topsellers").then((r) => r.json()).then((d) => { if (d?.available) setRealTop(d); }).catch(() => {});
+    });
   }, []);
   const skus = useMemo(() => buildSkus(liveSkus, { surge, delay }), [liveSkus, surge, delay]);
   const baseAgg = useMemo(() => salesAgg(skus), [skus]);
