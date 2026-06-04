@@ -40,7 +40,7 @@ const RISK = {
   1: { label: "Reorder now", color: C.warning, Icon: AlertTriangle },
   2: { label: "Healthy", color: C.success, Icon: CheckCircle2 },
   3: { label: "Overstock", color: C.overstock, Icon: Layers },
-  4: { label: "Dead stock (100d+ no sale)", color: C.dead, Icon: Snowflake },
+  4: { label: "Dead stock (no recent sale)", color: C.dead, Icon: Snowflake },
   5: { label: "Out of stock", color: C.subtle, Icon: Package },
 };
 
@@ -676,7 +676,7 @@ function DeadStock({ skus }) {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
       <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 14 }}>
-        <Kpi label="Dead stock (100d+ no sale)" value={dead.length} tone={C.dead} Icon={Snowflake} sub={inrC(trapped) + " retail"} />
+        <Kpi label="Dead stock (no recent sale)" value={dead.length} tone={C.dead} Icon={Snowflake} sub={inrC(trapped) + " retail"} />
         <Kpi label="Healthy SKUs" value={healthy.length} tone={C.success} Icon={CheckCircle2} />
         <Kpi label="Overstocked SKUs" value={over.length} tone={C.overstock} Icon={Layers} />
         <Kpi label="Out of stock (0 on hand)" value={oos.length} tone={C.subtle} Icon={Package} />

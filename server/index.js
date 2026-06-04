@@ -124,7 +124,7 @@ async function refreshDeadSet(force = false) {
   if (!force && state.soldSet100At && Date.now() - state.soldSet100At < 6 * 3600 * 1000) return;
   try {
     const since = istDayStartUTC(100); const set = {}; let page = 1, seen = 0;
-    while (page <= 120) {
+    while (page <= 45) { // free-tier: covers most recent ~45 days reliably; raise to 120 on always-on for full 100d
       const d = await mg("/orders", { "searchCriteria[filterGroups][0][filters][0][field]": "created_at", "searchCriteria[filterGroups][0][filters][0][value]": since, "searchCriteria[filterGroups][0][filters][0][conditionType]": "gteq", "searchCriteria[pageSize]": "100", "searchCriteria[currentPage]": String(page), fields: "total_count,items[status,items[sku]]" });
       for (const o of d.items || []) { if (o.status === "canceled") continue; for (const it of o.items || []) if (it.sku) set[it.sku] = 1; }
       seen += (d.items || []).length; const tc = d.total_count || 0; if (seen >= tc || !(d.items || []).length) break; page++;
