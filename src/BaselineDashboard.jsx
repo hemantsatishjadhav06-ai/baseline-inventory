@@ -41,6 +41,7 @@ const RISK = {
   2: { label: "Healthy", color: C.success, Icon: CheckCircle2 },
   3: { label: "Overstock", color: C.overstock, Icon: Layers },
   4: { label: "Dead stock", color: C.dead, Icon: Snowflake },
+  5: { label: "Out of stock", color: C.subtle, Icon: Package },
 };
 
 const SEASON = {
@@ -100,6 +101,7 @@ function buildSkus(source, { surge = 0, delay = 0 } = {}) {
     const cover = forecastDaily > 0 ? (p.onHand + p.inTransit) / forecastDaily : Infinity;
     let risk;
     if (p.avgDaily === 0 || p.daysSinceSale >= deadAfterDays) risk = 4;
+    else if ((p.onHand + p.inTransit) === 0) risk = 5; // on-hand 0 = out of stock (N/A for stockout radar)
     else if (cover > targetMaxDays) risk = 3;
     else if (cover <= effLead) risk = 0;
     else if (cover <= reorderWindow) risk = 1;
@@ -662,12 +664,30 @@ function ForecastWhatIf({ surge, setSurge, delay, setDelay, skus }) {
   );
 }
 function DeadStock({ skus }) {
-  const rows = useMemo(() => skus.filter((s) => s.risk === 4 || s.risk === 3).sort((a, b) => b.stockValue - a.stockValue).slice(0, 40), [skus]);
-  const trapped = skus.filter((s) => s.risk === 4 || s.risk === 3).reduce((a, s) => a + s.stockValue, 0);
+  const [list, setList] = useState("dead");
+  const dead = skus.filter((s) => s.risk === 4);
+  const healthy = skus.filter((s) => s.risk === 2);
+  const over = skus.filter((s) => s.risk === 3);
+  const oos = skus.filter((s) => s.risk === 5);
+  const sets = { dead, healthy, over, oos, all: skus };
+  const rows = useMemo(() => [...(sets[list] || [])].sort((a, b) => b.stockValue - a.stockValue), [list, skus]);
+  const trapped = dead.reduce((a, s) => a + s.stockValue, 0);
+  const exportRows = (arr, fname) => downloadCSV(fname, [["SKU", "Product", "Brand", "Category", "Status", "On hand", "Sale price", "Retail value", "30d run-rate", "Days cover"], ...arr.map((s) => [s.sku, s.name, s.brand, s.category, RISK[s.risk].label, s.onHand, s.price, Math.round(s.stockValue), s.avgDaily, isFinite(s.cover) ? Math.round(s.cover) : ""])]);
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 14 }}><Kpi label="Slow stock (retail value)" value={inrC(trapped)} tone={C.dead} Icon={Snowflake} /><Kpi label="Dead SKUs (no sale 90d+)" value={skus.filter((s) => s.risk === 4).length} tone={C.dead} Icon={Snowflake} /><Kpi label="Overstocked SKUs" value={skus.filter((s) => s.risk === 3).length} tone={C.overstock} Icon={Layers} /></div>
-      <Card title="Markdown & clearance candidates" subtitle="highest trapped cash first" pad={0}><OpsTable rows={rows} cols={["product", "risk", "age", "onhand", "value", "markdown"]} /></Card>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 14 }}>
+        <Kpi label="Dead SKUs (no sale 90d+)" value={dead.length} tone={C.dead} Icon={Snowflake} sub={inrC(trapped) + " retail"} />
+        <Kpi label="Healthy SKUs" value={healthy.length} tone={C.success} Icon={CheckCircle2} />
+        <Kpi label="Overstocked SKUs" value={over.length} tone={C.overstock} Icon={Layers} />
+        <Kpi label="Out of stock (0 on hand)" value={oos.length} tone={C.subtle} Icon={Package} />
+      </div>
+      <Card title="SKU lists — full export" subtitle={`${rows.length} SKUs in this list · click a row for SKU 360`} pad={0}
+        action={<div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <Segment value={list} onChange={setList} options={[{ v: "dead", l: "Dead" }, { v: "healthy", l: "Healthy" }, { v: "over", l: "Overstock" }, { v: "oos", l: "Out of stock" }, { v: "all", l: "All" }]} />
+          <button onClick={() => exportRows(rows, `baseline-${list}.csv`)} style={{ ...btnGhost, display: "inline-flex", alignItems: "center", gap: 6 }}><Download size={14} /> Export</button>
+        </div>}>
+        <div style={{ maxHeight: 520, overflowY: "auto" }}><OpsTable rows={rows} cols={["product", "risk", "age", "onhand", "value", "markdown"]} /></div>
+      </Card>
     </div>
   );
 }
