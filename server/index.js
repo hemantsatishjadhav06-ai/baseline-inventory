@@ -162,9 +162,9 @@ async function aggPeriod(since, cap) {
 const topOf = (agg) => Object.values(agg).filter((x) => x.r > 0).sort((a, b) => b.r - a.r).slice(0, 12).map((x) => ({ sku: x.sku, name: x.name, units: Math.round(x.u), revenue: Math.round(x.r) }));
 async function syncOrders() {
   try {
-    const l30 = await aggPeriod(istDayStartUTC(30), 10);
-    const wk = await aggPeriod(istDayStartUTC(7), 6);
-    const td = await aggPeriod(istDayStartUTC(0), 3);
+    const l30 = await aggPeriod(istDayStartUTC(30), 35);
+    const wk = await aggPeriod(istDayStartUTC(7), 12);
+    const td = await aggPeriod(istDayStartUTC(0), 5);
     for (const s of state.skus) { const a = l30[s.sku]; if (a) { s.avgDaily = +(a.u / 30).toFixed(2); s.daysSinceSale = wk[s.sku] ? 2 : 20; } else { s.avgDaily = 0; s.daysSinceSale = 999; } }
     state.topSellers = { today: topOf(td), week: topOf(wk), month: topOf(l30), all: topOf(l30) };
     state.ordersLive = true; delete state.errors.orders;
