@@ -8,8 +8,42 @@ import cors from "cors";
 import crypto from "crypto";
 
 const app = express();
-app.use(cors());
+
+// CORS: allow the dashboard (any *.onrender.com incl. PR previews), localhost dev,
+// and non-browser callers (no Origin header → GitHub Actions snapshot, keepalive,
+// curl). Other browser origins get no CORS grant, so a random site can't read our
+// responses or drive the AI proxy from a victim's browser.
+const ALLOW_ORIGIN = [/^https?:\/\/([a-z0-9-]+\.)?onrender\.com$/i, /^http:\/\/localhost(:\d+)?$/i, /^http:\/\/127\.0\.0\.1(:\d+)?$/i];
+app.use(cors({ origin: (origin, cb) => cb(null, !origin || ALLOW_ORIGIN.some((re) => re.test(origin))) }));
 app.use(express.json({ limit: "1mb" }));
+app.set("trust proxy", true); // Render runs behind a proxy; trust X-Forwarded-For for the client IP
+
+// Lightweight in-memory per-IP rate limiter for the expensive endpoints: the AI
+// proxy spends OpenRouter credits, and sync/refreshdead are heavy Magento pulls.
+const _rl = new Map();
+function rateLimit(windowMs, max) {
+  return (req, res, next) => {
+    const ip = String(req.headers["x-forwarded-for"] || req.ip || req.socket.remoteAddress || "?").split(",")[0].trim();
+    const now = Date.now();
+    const hits = (_rl.get(ip) || []).filter((t) => now - t < windowMs);
+    if (hits.length >= max) return res.status(429).json({ error: "rate limited", retryAfterMs: windowMs - (now - hits[0]) });
+    hits.push(now); _rl.set(ip, hits);
+    next();
+  };
+}
+setInterval(() => { const now = Date.now(); for (const [ip, ts] of _rl) { const keep = ts.filter((t) => now - t < 3600000); keep.length ? _rl.set(ip, keep) : _rl.delete(ip); } }, 3600000).unref?.();
+
+// Optional shared-secret guard for the admin/sync endpoints. If SYNC_SECRET is set
+// in the environment, callers must present it (x-sync-secret header or ?key=); if
+// it is unset the endpoints stay open (rate-limited only) so nothing breaks today.
+const SYNC_SECRET = process.env.SYNC_SECRET || "";
+const safeEq = (a, b) => { const A = Buffer.from(String(a)), B = Buffer.from(String(b)); return A.length === B.length && crypto.timingSafeEqual(A, B); };
+function requireSecret(req, res, next) {
+  if (!SYNC_SECRET) return next();
+  const k = req.headers["x-sync-secret"] || req.query.key;
+  if (k && safeEq(k, SYNC_SECRET)) return next();
+  return res.status(401).json({ error: "unauthorized" });
+}
 
 const PORT = process.env.PORT || 4000;
 const OR_KEY = process.env.OPENROUTER_API_KEY;
@@ -26,7 +60,12 @@ const ATS = process.env.MAGENTO_ACCESS_TOKEN_SECRET;
 const OAUTH = !!(CK && CS && AT && ATS);
 
 const enc = (s) => encodeURIComponent(String(s)).replace(/[!*'()]/g, (c) => "%" + c.charCodeAt(0).toString(16).toUpperCase());
-function mg(path, params = {}) {
+// Gentle client-side throttle (~6 req/s) so the larger, un-truncated syncs don't trip Magento rate limits.
+let _mgLast = 0;
+async function mg(path, params = {}) {
+  const _wait = Math.max(0, _mgLast + 150 - Date.now());
+  if (_wait) await new Promise((r) => setTimeout(r, _wait));
+  _mgLast = Date.now();
   const url = MG_BASE + MG_PREFIX + path;
   const o = {
     oauth_consumer_key: CK, oauth_token: AT, oauth_signature_method: "HMAC-SHA256",
@@ -72,7 +111,7 @@ async function syncCatalog() {
   for (const [cid, bucket] of Object.entries(CAT_IDS)) {
     try {
       let page = 1, got = 0;
-      while (page <= 8) {
+      while (page <= 60) { // cover full categories (Racquets ~2.7k, Shoes ~1.9k); loop breaks early at total_count
         const data = await mg("/products", {
           "searchCriteria[filterGroups][0][filters][0][field]": "category_id",
           "searchCriteria[filterGroups][0][filters][0][value]": cid,
@@ -104,7 +143,7 @@ async function syncCatalog() {
 async function syncStock() {
   try {
     const map = {}; let page = 1;
-    while (page <= 18) {
+    while (page <= 200) { // page through ALL source-items (loop breaks at total_count); old cap of 18 truncated stock
       const d = await mg("/inventory/source-items", { "searchCriteria[pageSize]": "200", "searchCriteria[currentPage]": String(page) });
       for (const it of d.items || []) map[it.sku] = (map[it.sku] || 0) + Number(it.quantity || 0);
       const tc = d.total_count || 0; if (page * 200 >= tc || !(d.items || []).length) break; page++;
@@ -124,8 +163,8 @@ async function refreshDeadSet(force = false) {
   if (!force && state.soldSet100At && Date.now() - state.soldSet100At < 6 * 3600 * 1000) return;
   try {
     const since = istDayStartUTC(100); const set = {}; let page = 1, seen = 0;
-    while (page <= 45) { // free-tier: covers most recent ~45 days reliably; raise to 120 on always-on for full 100d
-      const d = await mg("/orders", { "searchCriteria[filterGroups][0][filters][0][field]": "created_at", "searchCriteria[filterGroups][0][filters][0][value]": since, "searchCriteria[filterGroups][0][filters][0][conditionType]": "gteq", "searchCriteria[pageSize]": "100", "searchCriteria[currentPage]": String(page), fields: "total_count,items[status,items[sku]]" });
+    while (page <= 200) { // newest-first + server-side 100d filter → page through ALL in-window orders (breaks at total_count). The old cap+no-sort dropped the most RECENT orders, falsely flagging live SKUs as dead.
+      const d = await mg("/orders", { "searchCriteria[filterGroups][0][filters][0][field]": "created_at", "searchCriteria[filterGroups][0][filters][0][value]": since, "searchCriteria[filterGroups][0][filters][0][conditionType]": "gteq", "sortOrders[0][field]": "created_at", "sortOrders[0][direction]": "DESC", "searchCriteria[pageSize]": "100", "searchCriteria[currentPage]": String(page), fields: "total_count,items[status,items[sku]]" });
       for (const o of d.items || []) { if (o.status === "canceled") continue; for (const it of o.items || []) if (it.sku) set[it.sku] = 1; }
       seen += (d.items || []).length; const tc = d.total_count || 0; if (seen >= tc || !(d.items || []).length) break; page++;
     }
@@ -136,12 +175,12 @@ async function refreshDeadSet(force = false) {
 // Magento store timezone is Asia/Kolkata (UTC+5:30); "today" must use the IST calendar day.
 const IST = 5.5 * 3600 * 1000;
 function istDayStartUTC(daysAgo = 0) { const t = new Date(Date.now() + IST); t.setUTCDate(t.getUTCDate() - daysAgo); t.setUTCHours(0, 0, 0, 0); return new Date(t.getTime() - IST).toISOString().slice(0, 19).replace("T", " "); }
-function istMonthStartUTC() { const t = new Date(Date.now() + IST); t.setUTCDate(1); t.setUTCHours(0, 0, 0, 0); return new Date(t.getTime() - IST).toISOString().slice(0, 19).replace("T", " "); }
+// (calendar month-to-date helper removed — "month" is now a trailing 30-day window; see syncSales)
 // Sales = realized (invoiced) revenue, matching Magento's "today's sale" figure.
 async function sumOrders(since, cap = 30) {
   let invoiced = 0, gross = 0, orders = 0, page = 1, seen = 0; const byStore = {};
   while (page <= cap) {
-    const d = await mg("/orders", { "searchCriteria[filterGroups][0][filters][0][field]": "created_at", "searchCriteria[filterGroups][0][filters][0][value]": since, "searchCriteria[filterGroups][0][filters][0][conditionType]": "gteq", "searchCriteria[pageSize]": "100", "searchCriteria[currentPage]": String(page), fields: "total_count,items[grand_total,total_invoiced,status,store_id]" });
+    const d = await mg("/orders", { "searchCriteria[filterGroups][0][filters][0][field]": "created_at", "searchCriteria[filterGroups][0][filters][0][value]": since, "searchCriteria[filterGroups][0][filters][0][conditionType]": "gteq", "sortOrders[0][field]": "created_at", "sortOrders[0][direction]": "DESC", "searchCriteria[pageSize]": "100", "searchCriteria[currentPage]": String(page), fields: "total_count,items[grand_total,total_invoiced,status,store_id]" });
     const tc = d.total_count || 0;
     for (const o of d.items || []) { if (o.status === "canceled") continue; const v = Number(o.total_invoiced || 0); invoiced += v; gross += Number(o.grand_total || 0); orders++; const code = STORE_BY_ID[o.store_id]; if (code) byStore[code] = (byStore[code] || 0) + v; }
     seen += (d.items || []).length; if (seen >= tc || !(d.items || []).length) break; page++;
@@ -150,9 +189,12 @@ async function sumOrders(since, cap = 30) {
 }
 async function syncSales() {
   try {
-    const today = await sumOrders(istDayStartUTC(0), 5);
-    const week = await sumOrders(istDayStartUTC(7), 12);
-    const month = await sumOrders(istMonthStartUTC(), 35);
+    const today = await sumOrders(istDayStartUTC(0), 30);
+    const week = await sumOrders(istDayStartUTC(7), 30);
+    // "month" = trailing 30 days. Matches the 30-day window used everywhere else in
+    // the app (top-sellers, forecasts) and guarantees month >= week, instead of
+    // comparing a few days of month-to-date against a full trailing 7-day span.
+    const month = await sumOrders(istDayStartUTC(30), 60);
     const roundStores = (o) => Object.fromEntries(Object.entries(o).map(([k, v]) => [k, Math.round(v)]));
     state.sales = { today: today.revenue, todayOrders: today.orders, todayGross: today.gross, week: week.revenue, month: month.revenue, currency: "INR",
       byStoreToday: roundStores(today.byStore), byStoreMonth: roundStores(month.byStore) };
@@ -165,7 +207,7 @@ async function syncSales() {
 async function aggPeriod(since, cap) {
   const bySku = {}; let page = 1, seen = 0;
   while (page <= cap) {
-    const d = await mg("/orders", { "searchCriteria[filterGroups][0][filters][0][field]": "created_at", "searchCriteria[filterGroups][0][filters][0][value]": since, "searchCriteria[filterGroups][0][filters][0][conditionType]": "gteq", "searchCriteria[pageSize]": "100", "searchCriteria[currentPage]": String(page), fields: "total_count,items[status,items[sku,name,qty_invoiced,qty_ordered,row_total]]" });
+    const d = await mg("/orders", { "searchCriteria[filterGroups][0][filters][0][field]": "created_at", "searchCriteria[filterGroups][0][filters][0][value]": since, "searchCriteria[filterGroups][0][filters][0][conditionType]": "gteq", "sortOrders[0][field]": "created_at", "sortOrders[0][direction]": "DESC", "searchCriteria[pageSize]": "100", "searchCriteria[currentPage]": String(page), fields: "total_count,items[status,items[sku,name,qty_invoiced,qty_ordered,row_total]]" });
     const tc = d.total_count || 0;
     for (const o of d.items || []) {
       if (o.status === "canceled") continue;
@@ -183,9 +225,9 @@ async function aggPeriod(since, cap) {
 const topOf = (agg) => Object.values(agg).filter((x) => x.r > 0).sort((a, b) => b.r - a.r).slice(0, 12).map((x) => ({ sku: x.sku, name: x.name, units: Math.round(x.u), revenue: Math.round(x.r) }));
 async function syncOrders() {
   try {
-    const l30 = await aggPeriod(istDayStartUTC(30), 35);
-    const wk = await aggPeriod(istDayStartUTC(7), 12);
-    const td = await aggPeriod(istDayStartUTC(0), 5);
+    const l30 = await aggPeriod(istDayStartUTC(30), 60);
+    const wk = await aggPeriod(istDayStartUTC(7), 30);
+    const td = await aggPeriod(istDayStartUTC(0), 30);
     for (const s of state.skus) { const a = l30[s.sku]; if (a) { s.avgDaily = +(a.u / 30).toFixed(2); s.daysSinceSale = wk[s.sku] ? 2 : 20; } else { s.avgDaily = 0; s.daysSinceSale = 999; } }
     state.topSellers = { today: topOf(td), week: topOf(wk), month: topOf(l30), all: topOf(l30) };
     state.ordersLive = true; delete state.errors.orders;
@@ -204,10 +246,10 @@ app.get("/api/health", (_q, res) => res.json({ ok: true, model: MODEL, auth: sta
 app.get("/api/catalog", async (_q, res) => { if (!state.lastSync && !syncing) await runSync().catch(() => {}); else if (stale() && !syncing) runSync().catch(() => {}); res.json({ source: { catalog: state.catalogLive ? "live" : "unavailable", stock: state.stockLive ? "live" : "modeled", sales: state.salesLive ? "live" : "modeled", velocity: state.ordersLive ? "live" : "modeled" }, lastSync: state.lastSync, totalProducts: state.totalProducts, count: state.skus.length, skus: state.skus }); });
 app.get("/api/topsellers", async (_q, res) => { if (!state.lastSync && !syncing) await runSync().catch(() => {}); else if (stale() && !syncing) runSync().catch(() => {}); res.json({ available: state.ordersLive, lastSync: state.lastSync, ...state.topSellers }); });
 app.get("/api/sales", async (_q, res) => { if (!state.lastSync && !syncing) await runSync().catch(() => {}); else if (stale() && !syncing) runSync().catch(() => {}); state.salesLive ? res.json({ available: true, ...state.sales, lastSync: state.lastSync }) : res.json({ available: false, reason: state.errors.sales || "not synced" }); });
-app.post("/api/sync", async (_q, res) => { await runSync(); res.json({ ok: true, lastSync: state.lastSync, count: state.skus.length, salesLive: state.salesLive, stockLive: state.stockLive, sales: state.sales }); });
-app.post("/api/refreshdead", async (_q, res) => { await refreshDeadSet(true); const n = Object.keys(state.soldSet100).length; for (const s of state.skus) s.soldWithin100 = n ? !!state.soldSet100[s.sku] : true; res.json({ deadSet: n, dead: state.skus.filter((s) => s.soldWithin100 === false).length }); });
+app.post("/api/sync", rateLimit(3600000, 20), requireSecret, async (_q, res) => { await runSync(); res.json({ ok: true, lastSync: state.lastSync, count: state.skus.length, salesLive: state.salesLive, stockLive: state.stockLive, sales: state.sales }); });
+app.post("/api/refreshdead", rateLimit(3600000, 10), requireSecret, async (_q, res) => { await refreshDeadSet(true); const n = Object.keys(state.soldSet100).length; for (const s of state.skus) s.soldWithin100 = n ? !!state.soldSet100[s.sku] : true; res.json({ deadSet: n, dead: state.skus.filter((s) => s.soldWithin100 === false).length }); });
 
-app.post("/api/chat", async (req, res) => {
+app.post("/api/chat", rateLimit(600000, 30), async (req, res) => {
   if (!OR_KEY) return res.status(500).json({ error: "OPENROUTER_API_KEY not set" });
   const { question, context = {}, role = "exec", history = [] } = req.body || {};
   if (!question) return res.status(400).json({ error: "question required" });
