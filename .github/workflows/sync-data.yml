@@ -41,7 +41,7 @@ jobs:
               "totalProducts": cat.get("totalProducts"),
               "count": cat.get("count"),
               "skus": cat.get("skus", []),
-              "sales": {"available": bool(sales.get("available")), "today": sales.get("today"), "week": sales.get("week"), "month": sales.get("month"), "currency": "INR"},
+              "sales": {"available": bool(sales.get("available")), "today": sales.get("today"), "week": sales.get("week"), "month": sales.get("month"), "currency": "INR", "byStoreMonth": sales.get("byStoreMonth"), "byStoreToday": sales.get("byStoreToday")},
               "topSellers": {"available": bool(top.get("available")), "today": top.get("today", []), "week": top.get("week", []), "month": top.get("month", []), "all": top.get("all", [])},
           }
           open("/tmp/live.json", "w").write(json.dumps(out))

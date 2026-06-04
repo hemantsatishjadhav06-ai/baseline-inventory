@@ -47,6 +47,7 @@ const hmod = (s, salt, m) => parseInt(crypto.createHash("md5").update(s + salt).
 
 const CAT_IDS = { 25: "Racquets", 29: "Strings", 31: "Balls", 24: "Shoes", 115: "Bags", 128: "Grips", 36: "Apparel", 37: "Accessories" };
 const WMAP = { 1: "tennisoutlet", 2: "pickleballoutlet", 3: "padeloutlet", 4: "syxxsports", 5: "badmintonoutlet", 6: "squashoutlet" };
+const STORE_BY_ID = { 1: "tennisoutlet", 3: "pickleballoutlet", 4: "padeloutlet", 5: "syxxsports", 6: "badmintonoutlet", 7: "squashoutlet" }; // order store_id -> sport site (real)
 const LEAD = { Babolat: 10, Wilson: 14, YONEX: 21, Head: 18, Nike: 16, Adidas: 22, ASICS: 20, Solinco: 7, Luxilon: 14, Dunlop: 15, Tecnifibre: 16, Prince: 18, Slazenger: 15, Tourna: 10 };
 const CAT_BASE = { Balls: 3.0, Strings: 1.3, Grips: 2.4, Accessories: 1.1, Apparel: 0.8, Bags: 0.45, Shoes: 0.6, Racquets: 0.7 };
 
@@ -120,21 +121,23 @@ function istDayStartUTC(daysAgo = 0) { const t = new Date(Date.now() + IST); t.s
 function istMonthStartUTC() { const t = new Date(Date.now() + IST); t.setUTCDate(1); t.setUTCHours(0, 0, 0, 0); return new Date(t.getTime() - IST).toISOString().slice(0, 19).replace("T", " "); }
 // Sales = realized (invoiced) revenue, matching Magento's "today's sale" figure.
 async function sumOrders(since, cap = 30) {
-  let invoiced = 0, gross = 0, orders = 0, page = 1, seen = 0;
+  let invoiced = 0, gross = 0, orders = 0, page = 1, seen = 0; const byStore = {};
   while (page <= cap) {
-    const d = await mg("/orders", { "searchCriteria[filterGroups][0][filters][0][field]": "created_at", "searchCriteria[filterGroups][0][filters][0][value]": since, "searchCriteria[filterGroups][0][filters][0][conditionType]": "gteq", "searchCriteria[pageSize]": "100", "searchCriteria[currentPage]": String(page), fields: "total_count,items[grand_total,total_invoiced,status]" });
+    const d = await mg("/orders", { "searchCriteria[filterGroups][0][filters][0][field]": "created_at", "searchCriteria[filterGroups][0][filters][0][value]": since, "searchCriteria[filterGroups][0][filters][0][conditionType]": "gteq", "searchCriteria[pageSize]": "100", "searchCriteria[currentPage]": String(page), fields: "total_count,items[grand_total,total_invoiced,status,store_id]" });
     const tc = d.total_count || 0;
-    for (const o of d.items || []) { if (o.status === "canceled") continue; invoiced += Number(o.total_invoiced || 0); gross += Number(o.grand_total || 0); orders++; }
+    for (const o of d.items || []) { if (o.status === "canceled") continue; const v = Number(o.total_invoiced || 0); invoiced += v; gross += Number(o.grand_total || 0); orders++; const code = STORE_BY_ID[o.store_id]; if (code) byStore[code] = (byStore[code] || 0) + v; }
     seen += (d.items || []).length; if (seen >= tc || !(d.items || []).length) break; page++;
   }
-  return { revenue: Math.round(invoiced), gross: Math.round(gross), orders };
+  return { revenue: Math.round(invoiced), gross: Math.round(gross), orders, byStore };
 }
 async function syncSales() {
   try {
     const today = await sumOrders(istDayStartUTC(0), 5);
-    const week = await sumOrders(istDayStartUTC(7), 10);
-    const month = await sumOrders(istMonthStartUTC(), 30);
-    state.sales = { today: today.revenue, todayOrders: today.orders, todayGross: today.gross, week: week.revenue, month: month.revenue, currency: "INR" };
+    const week = await sumOrders(istDayStartUTC(7), 12);
+    const month = await sumOrders(istMonthStartUTC(), 35);
+    const roundStores = (o) => Object.fromEntries(Object.entries(o).map(([k, v]) => [k, Math.round(v)]));
+    state.sales = { today: today.revenue, todayOrders: today.orders, todayGross: today.gross, week: week.revenue, month: month.revenue, currency: "INR",
+      byStoreToday: roundStores(today.byStore), byStoreMonth: roundStores(month.byStore) };
     state.salesLive = true; delete state.errors.sales;
   } catch (e) { state.salesLive = false; state.errors.sales = `${e.status || e.message}`; }
 }

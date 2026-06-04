@@ -1065,18 +1065,17 @@ function ApiRef() {
 }
 
 /* ============================ GROUP — MULTI-SPORT ============================ */
-function GroupView({ skus, onAddPo }) {
+function GroupView({ skus, onAddPo, realSales }) {
   const [sport, setSport] = useState("all");
-  const inStore = (s, code) => storesFor(s).includes(code);
-  // per-store aggregates
+  const byStore = realSales?.byStoreMonth || null;            // REAL per-store invoiced this month (by order store_id)
+  const inStore = (s, code) => (s.wsites || ["tennisoutlet"]).includes(code); // REAL website membership
   const stores = STORE_CODES.map((code) => {
     const members = skus.filter((s) => inStore(s, code));
-    const slice = (s) => (storeSlices(s).find((x) => x.code === code)?.qty) || 0;
-    const stockVal = members.reduce((a, s) => a + slice(s) * s.unitCost, 0);
-    const rev = members.reduce((a, s) => a + s.dailyRev * 30 / storesFor(s).length, 0);
-    const atRisk = members.filter((s) => s.risk <= 1).length;
-    return { code, ...STORE_META[code], products: members.length, stockVal, rev, atRisk };
-  }).sort((a, b) => b.stockVal - a.stockVal);
+    const stockVal = members.reduce((a, s) => a + s.onHand * s.price, 0); // real retail value
+    const rev = byStore ? (byStore[code] || 0) : members.reduce((a, s) => a + s.dailyRev * 30 / ((s.wsites || ["tennisoutlet"]).length), 0);
+    const atRisk = members.filter((s) => s.risk <= 1 && s.onHand >= 1).length;
+    return { code, ...STORE_META[code], products: members.length, stockVal, rev, revLive: !!byStore, atRisk };
+  }).sort((a, b) => b.rev - a.rev);
 
   // pooling: shared SKUs at risk → consolidate the buy across stores for better tiers
   const pool = skus.filter((s) => SHARED_CATS.includes(s.category) && s.suggestedQty > 0)
@@ -1105,14 +1104,14 @@ function GroupView({ skus, onAddPo }) {
             <div style={{ display: "flex", alignItems: "center", gap: 8 }}><Store size={15} color={C.blue} /><span style={{ fontSize: 14, fontWeight: 600 }}>{s.name}</span><span style={{ marginLeft: "auto", fontSize: 10, fontWeight: 600, color: C.muted, background: C.surfaceAlt, borderRadius: 999, padding: "2px 8px" }}>{s.sport}</span></div>
             <div style={{ display: "flex", gap: 16, marginTop: 12 }}>
               <div><div style={{ fontSize: 10, color: C.muted, textTransform: "uppercase" }}>Stock value</div><div style={{ fontFamily: mono, fontSize: 16, fontWeight: 600 }}>{inrC(s.stockVal)}</div></div>
-              <div><div style={{ fontSize: 10, color: C.muted, textTransform: "uppercase" }}>Monthly rev (est.)</div><div style={{ fontFamily: mono, fontSize: 16, fontWeight: 600 }}>{inrC(s.rev)}</div></div>
+              <div><div style={{ fontSize: 10, color: C.muted, textTransform: "uppercase" }}>{s.revLive ? "Monthly sales (live)" : "Monthly rev (est.)"}</div><div style={{ fontFamily: mono, fontSize: 16, fontWeight: 600 }}>{inrC(s.rev)}</div></div>
             </div>
             <div style={{ fontSize: 12, color: s.atRisk ? C.danger : C.subtle, marginTop: 10 }}>{s.products} SKUs · {s.atRisk ? s.atRisk + " at risk" : "all healthy"}</div>
           </div>
         ))}
       </div>
 
-      <Card title="Group procurement pooling" subtitle={`Consolidate shared SKUs across all sport-stores → one bigger order, better supplier tier. Pooled value ${inrC(poolValue)}.`} pad={0}>
+      <Card title="Group procurement pooling (illustrative)" subtitle={`Potential: consolidate shared SKUs across stores for better supplier tiers. Indicative pooled value ${inrC(poolValue)}.`} pad={0}>
         <div style={{ overflowX: "auto" }}><table style={{ width: "100%", borderCollapse: "collapse" }}>
           <thead><tr>{["Product", "Category", "Stores", "Per store", "Pooled qty", "Pooled value", ""].map((h, i) => <th key={h} style={{ textAlign: i >= 2 && i <= 5 ? "right" : i === 6 ? "right" : "left", fontSize: 11, fontWeight: 600, textTransform: "uppercase", color: C.muted, padding: "11px 14px", background: C.surfaceAlt }}>{h}</th>)}</tr></thead>
           <tbody>{pool.map((p) => (
@@ -1496,7 +1495,7 @@ export default function BaselineDashboard() {
           {tab === "forecast" && <ForecastWhatIf surge={surge} setSurge={setSurge} delay={delay} setDelay={setDelay} skus={skus} />}
           {tab === "po" && <AutoPO skus={skus} poItems={poItems} approved={approved} setApproved={setApproved} budget={budget} setBudget={setBudget} />}
           {tab === "suppliers" && <Suppliers skus={skus} />}
-          {tab === "group" && <GroupView skus={skus} onAddPo={addPo} />}
+          {tab === "group" && <GroupView skus={skus} onAddPo={addPo} realSales={realSales} />}
           {tab === "brands" && <BrandSales skus={skus} />}
           {tab === "storesales" && <StoreSales skus={skus} />}
           {tab === "autopilot" && <Autopilot skus={skus} agg={agg} util={util} go={go} addPo={addPo} approved={approved} setApproved={setApproved} />}
