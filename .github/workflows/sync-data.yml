@@ -44,11 +44,16 @@ jobs:
               "sales": {"available": bool(sales.get("available")), "today": sales.get("today"), "week": sales.get("week"), "month": sales.get("month"), "currency": "INR", "byStoreMonth": sales.get("byStoreMonth"), "byStoreToday": sales.get("byStoreToday")},
               "topSellers": {"available": bool(top.get("available")), "today": top.get("today", []), "week": top.get("week", []), "month": top.get("month", []), "all": top.get("all", [])},
           }
-          open("/tmp/live.json", "w").write(json.dumps(out))
-          print("ready", ready, "| count", out["count"], "| today", out["sales"]["today"], "| topWeek", len(out["topSellers"]["week"]))
+          stock_live = (cat.get("source") or {}).get("stock") == "live"
+          if out["count"] and stock_live and out["sales"]["available"]:
+              open("/tmp/live.json", "w").write(json.dumps(out)); print("READY — will publish")
+          else:
+              print("NOT READY (count/stock/sales incomplete) — skipping publish to keep last-good data")
+          print("ready", ready, "| stockLive", stock_live, "| count", out["count"], "| today", out["sales"]["today"])
           PY
-      - name: Publish to data branch
+      - name: Publish to data branch (only if fresh data is complete)
         run: |
+          if [ ! -f /tmp/live.json ]; then echo "no fresh file — keeping last-good live.json"; exit 0; fi
           git config user.name "baseline-bot"; git config user.email "bot@baseline.local"
           git checkout --orphan data
           git rm -rf . >/dev/null 2>&1 || true

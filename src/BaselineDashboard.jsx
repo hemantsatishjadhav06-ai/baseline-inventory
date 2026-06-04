@@ -1412,7 +1412,8 @@ export default function BaselineDashboard() {
         fetch(API_BASE + "/api/sales", { cache: "no-store" }).then((r) => r.json()).catch(() => null),
         fetch(API_BASE + "/api/topsellers", { cache: "no-store" }).then((r) => r.json()).catch(() => null),
       ]).then(([cat, sales, top]) => {
-        if (cat?.skus?.length) { setLiveSkus(cat.skus); setSync({ live: true, lastSync: cat.lastSync, salesLive: cat.source?.sales === "live" }); }
+        // Only adopt backend catalog when STOCK is fully live (avoid showing half-synced modeled stock)
+        if (cat?.skus?.length && cat.source?.stock === "live") { setLiveSkus(cat.skus); setSync({ live: true, lastSync: cat.lastSync, salesLive: cat.source?.sales === "live" }); }
         if (sales?.available) setRealSales(sales);
         if (top?.available) setRealTop(top);
       }).catch(() => {});
