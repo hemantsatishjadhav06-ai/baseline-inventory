@@ -40,7 +40,7 @@ const RISK = {
   1: { label: "Reorder now", color: C.warning, Icon: AlertTriangle },
   2: { label: "Healthy", color: C.success, Icon: CheckCircle2 },
   3: { label: "Overstock", color: C.overstock, Icon: Layers },
-  4: { label: "No recent sales (30d)", color: C.dead, Icon: Snowflake },
+  4: { label: "Dead stock (100d+ no sale)", color: C.dead, Icon: Snowflake },
   5: { label: "Out of stock", color: C.subtle, Icon: Package },
 };
 
@@ -100,8 +100,8 @@ function buildSkus(source, { surge = 0, delay = 0 } = {}) {
     const forecastDaily = p.avgDaily * seasonIdx(p.category) * (1 + surge / 100);
     const cover = forecastDaily > 0 ? (p.onHand + p.inTransit) / forecastDaily : Infinity;
     let risk;
-    if (p.avgDaily === 0 || p.daysSinceSale >= deadAfterDays) risk = 4;
-    else if ((p.onHand + p.inTransit) === 0) risk = 5; // on-hand 0 = out of stock (N/A for stockout radar)
+    if ((p.onHand + p.inTransit) === 0) risk = 5; // out of stock (excluded from SaaS in production)
+    else if (p.soldWithin100 === false) risk = 4; // DEAD = no movement in 100+ days (real, from Magento order history)
     else if (cover > targetMaxDays) risk = 3;
     else if (cover <= effLead) risk = 0;
     else if (cover <= reorderWindow) risk = 1;
@@ -676,14 +676,14 @@ function DeadStock({ skus }) {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
       <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 14 }}>
-        <Kpi label="No sales in 30d" value={dead.length} tone={C.dead} Icon={Snowflake} sub={inrC(trapped) + " retail"} />
+        <Kpi label="Dead stock (100d+ no sale)" value={dead.length} tone={C.dead} Icon={Snowflake} sub={inrC(trapped) + " retail"} />
         <Kpi label="Healthy SKUs" value={healthy.length} tone={C.success} Icon={CheckCircle2} />
         <Kpi label="Overstocked SKUs" value={over.length} tone={C.overstock} Icon={Layers} />
         <Kpi label="Out of stock (0 on hand)" value={oos.length} tone={C.subtle} Icon={Package} />
       </div>
       <Card title="SKU lists — full export" subtitle={`${rows.length} SKUs in this list · click a row for SKU 360`} pad={0}
         action={<div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-          <Segment value={list} onChange={setList} options={[{ v: "dead", l: "No 30d sales" }, { v: "healthy", l: "Healthy" }, { v: "over", l: "Overstock" }, { v: "oos", l: "Out of stock" }, { v: "all", l: "All" }]} />
+          <Segment value={list} onChange={setList} options={[{ v: "dead", l: "Dead 100d+" }, { v: "healthy", l: "Healthy" }, { v: "over", l: "Overstock" }, { v: "all", l: "All in-stock" }]} />
           <button onClick={() => exportRows(rows, `baseline-${list}.csv`)} style={{ ...btnGhost, display: "inline-flex", alignItems: "center", gap: 6 }}><Download size={14} /> Export</button>
         </div>}>
         <div style={{ maxHeight: 520, overflowY: "auto" }}><OpsTable rows={rows} cols={["product", "risk", "age", "onhand", "value", "markdown"]} /></div>

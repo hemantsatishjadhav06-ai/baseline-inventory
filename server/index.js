@@ -63,7 +63,7 @@ function modelOps(sku, category, price) {
   return { unitCost: cost, avgDaily, daysSinceSale, age: 20 + hmod(sku, "a", 160), onHand: 2 + hmod(sku, "o", 55), inTransit: hmod(sku, "t", 5) ? 0 : hmod(sku, "tq", 10), accuracy: +(0.86 + hmod(sku, "acc", 12) / 100).toFixed(2) };
 }
 
-const state = { lastSync: null, catalogLive: false, salesLive: false, stockLive: false, ordersLive: false, totalProducts: 0, skus: [], sales: null, topSellers: {}, errors: {}, auth: OAUTH ? "oauth" : "none" };
+const state = { lastSync: null, catalogLive: false, salesLive: false, stockLive: false, ordersLive: false, totalProducts: 0, skus: [], sales: null, topSellers: {}, soldSet100: {}, soldSet100At: 0, errors: {}, auth: OAUTH ? "oauth" : "none" };
 
 async function syncCatalog() {
   if (!OAUTH) { state.errors.catalog = "Magento OAuth creds not set"; return; }
@@ -112,7 +112,25 @@ async function syncStock() {
     let applied = 0;
     for (const s of state.skus) { if (map[s.sku] != null) { s.onHand = Math.round(map[s.sku]); applied++; } }
     state.stockLive = applied > 0; delete state.errors.stock;
+    // (3) only keep products that are actually in stock (on-hand >= 1)
+    state.skus = state.skus.filter((s) => s.onHand >= 1);
+    // (2) flag dead = no movement in 100+ days, from the cached 100-day sold set
+    const set = state.soldSet100, ready = set && Object.keys(set).length > 0;
+    for (const s of state.skus) s.soldWithin100 = ready ? !!set[s.sku] : true;
   } catch (e) { state.stockLive = false; state.errors.stock = `${e.status || e.message}`; }
+}
+// 100-day "has it sold?" set — real dead-stock signal. Heavy (≈108 pages), so cached & refreshed every 6h.
+async function refreshDeadSet(force = false) {
+  if (!force && state.soldSet100At && Date.now() - state.soldSet100At < 6 * 3600 * 1000) return;
+  try {
+    const since = istDayStartUTC(100); const set = {}; let page = 1, seen = 0;
+    while (page <= 120) {
+      const d = await mg("/orders", { "searchCriteria[filterGroups][0][filters][0][field]": "created_at", "searchCriteria[filterGroups][0][filters][0][value]": since, "searchCriteria[filterGroups][0][filters][0][conditionType]": "gteq", "searchCriteria[pageSize]": "100", "searchCriteria[currentPage]": String(page), fields: "total_count,items[status,items[sku]]" });
+      for (const o of d.items || []) { if (o.status === "canceled") continue; for (const it of o.items || []) if (it.sku) set[it.sku] = 1; }
+      seen += (d.items || []).length; const tc = d.total_count || 0; if (seen >= tc || !(d.items || []).length) break; page++;
+    }
+    if (Object.keys(set).length) { state.soldSet100 = set; state.soldSet100At = Date.now(); for (const s of state.skus) s.soldWithin100 = !!set[s.sku]; delete state.errors.dead; }
+  } catch (e) { state.errors.dead = String(e.status || e.message); }
 }
 
 // Magento store timezone is Asia/Kolkata (UTC+5:30); "today" must use the IST calendar day.
@@ -205,6 +223,7 @@ app.post("/api/chat", async (req, res) => {
 
 app.listen(PORT, () => {
   console.log(`baseline-api on :${PORT} · auth ${state.auth} · model ${MODEL}`);
-  runSync().then(() => console.log(`sync: ${state.skus.length} SKUs, catalog ${state.catalogLive}, stock ${state.stockLive}, sales ${state.salesLive}`)).catch((e) => console.error("sync err", e.message));
+  runSync().then(() => { console.log(`sync: ${state.skus.length} SKUs in stock`); refreshDeadSet(true).then(() => console.log(`deadset: ${Object.keys(state.soldSet100).length} SKUs sold in 100d`)).catch(() => {}); }).catch((e) => console.error("sync err", e.message));
   setInterval(() => runSync().catch(() => { }), SYNC_MS);
+  setInterval(() => refreshDeadSet().catch(() => { }), 6 * 3600 * 1000);
 });
