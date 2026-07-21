@@ -128,12 +128,13 @@ test("snapshot exhaustion stays live but unready and never schedules Magento", a
   try {
     const live = await waitJson(`http://127.0.0.1:${appPort}/healthz`, 200);
     assert.equal(live.ok, true);
-    await waitOutput(app, /automatic Magento sync disabled/);
+    await waitOutput(app, /automatic Magento sync disabled until a validated snapshot is restored/);
     const ready = await waitJson(`http://127.0.0.1:${appPort}/readyz`, 503);
     assert.equal(ready.ok, false);
     assert.equal(ready.count, 0);
     assert.equal(snapshotRequests, 2);
     assert.doesNotMatch(app.output(), /next Magento sync/);
+    assert.match(app.output(), /snapshot-only recovery scheduled in 5 minutes/);
 
     const manual = await fetch(`http://127.0.0.1:${appPort}/api/sync`, {
       method: "POST",
