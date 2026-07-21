@@ -198,8 +198,8 @@ async function syncStock() {
     for (const s of state.skus) s.soldWithin100 = ready ? !!set[s.sku] : true;
   } catch (e) { state.stockLive = false; state.errors.stock = `${e.status || e.message}`; }
 }
-// 100-day "has it sold?" set — real dead-stock signal. It is a heavy historical
-// crawl, so refresh it at most once per day.
+// 100-day "has it sold?" set — real dead-stock signal. This is a heavy historical
+// crawl and is intentionally manual-only; run it during a maintenance window.
 async function refreshDeadSet(force = false) {
   if (!force && state.soldSet100At && Date.now() - state.soldSet100At < 24 * 3600 * 1000) return;
   try {
@@ -318,11 +318,7 @@ app.listen(PORT, () => {
     : 60_000 + Math.floor(Math.random() * 120_000);
   const startupTimer = setTimeout(() => {
     runSync()
-      .then(() => {
-        console.log(`sync: ${state.skus.length} SKUs in stock`);
-        return refreshDeadSet();
-      })
-      .then(() => console.log(`deadset: ${Object.keys(state.soldSet100).length} SKUs sold in 100d`))
+      .then(() => console.log(`sync: ${state.skus.length} SKUs in stock`))
       .catch((error) => console.error("sync err", error.message));
   }, startupDelayMs);
   startupTimer.unref?.();
@@ -335,6 +331,4 @@ app.listen(PORT, () => {
   }, SYNC_MS + syncJitterMs);
   scheduledSyncTimer.unref?.();
 
-  const deadSetTimer = setInterval(() => refreshDeadSet().catch(() => {}), 24 * 3600 * 1000);
-  deadSetTimer.unref?.();
 });
