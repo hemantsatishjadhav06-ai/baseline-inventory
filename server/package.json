@@ -4,7 +4,10 @@
   "private": true,
   "type": "module",
   "description": "Baseline AI proxy — keeps the OpenRouter key server-side.",
-  "scripts": { "start": "node index.js" },
+  "scripts": {
+    "start": "node index.js",
+    "test": "node --test test/*.test.js"
+  },
   "dependencies": {
     "cors": "^2.8.5",
     "express": "^4.19.2"
