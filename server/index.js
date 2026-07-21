@@ -6,7 +6,12 @@
 import express from "express";
 import cors from "cors";
 import crypto from "crypto";
-import { automaticSyncDelay, boundedInteger, loadSnapshotWithRetry } from "./snapshot.js";
+import {
+  automaticSyncDelay,
+  boundedInteger,
+  createSnapshotRecoveryCoordinator,
+  loadSnapshotWithRetry,
+} from "./snapshot.js";
 
 const app = express();
 
@@ -59,6 +64,12 @@ const SNAPSHOT_URL = process.env.SNAPSHOT_URL
 const SNAPSHOT_TIMEOUT_MS = boundedInteger(process.env.SNAPSHOT_TIMEOUT_MS, 15000, 3000, 60000);
 const SNAPSHOT_FETCH_ATTEMPTS = boundedInteger(process.env.SNAPSHOT_FETCH_ATTEMPTS, 4, 1, 6);
 const SNAPSHOT_RETRY_BASE_MS = boundedInteger(process.env.SNAPSHOT_RETRY_BASE_MS, 750, 100, 5000);
+const SNAPSHOT_RECOVERY_INTERVAL_MS = boundedInteger(
+  process.env.SNAPSHOT_RECOVERY_INTERVAL_MS,
+  5 * 60 * 1000,
+  60 * 1000,
+  60 * 60 * 1000,
+);
 
 // OAuth 1.0a
 const CK = process.env.MAGENTO_CONSUMER_KEY;
@@ -332,6 +343,10 @@ async function syncOrders() {
   } catch (e) { state.ordersLive = false; state.errors.orders = String(e.status || e.message); }
 }
 let syncing = false;
+let automaticSyncScheduled = false;
+let automaticSyncTimer = null;
+let recurringSyncTimer = null;
+let snapshotRecovery = null;
 async function runSync() {
   if (syncing) return false;
   if (!OAUTH) {
@@ -412,7 +427,7 @@ app.get("/readyz", (_q, res) => {
     ordersLive: state.ordersLive,
   });
 });
-app.get("/api/health", (_q, res) => res.json({ ok: true, model: MODEL, auth: state.auth, validated: stateValidated, syncing, syncIntervalMs: SYNC_MS, magentoMinIntervalMs: MAGENTO_MIN_INTERVAL_MS, snapshotFetchAttempts: SNAPSHOT_FETCH_ATTEMPTS, lastSync: state.lastSync, catalogLive: state.catalogLive, salesLive: state.salesLive, stockLive: state.stockLive, ordersLive: state.ordersLive, totalProducts: state.totalProducts, count: state.skus.length, deadSet: Object.keys(state.soldSet100).length, sales: state.sales, topSellers: { today: (state.topSellers.today || []).slice(0, 3) }, errors: state.errors }));
+app.get("/api/health", (_q, res) => res.json({ ok: true, model: MODEL, auth: state.auth, validated: stateValidated, syncing, automaticSyncScheduled, snapshotRecoveryScheduled: Boolean(snapshotRecovery?.isScheduled()), syncIntervalMs: SYNC_MS, magentoMinIntervalMs: MAGENTO_MIN_INTERVAL_MS, snapshotFetchAttempts: SNAPSHOT_FETCH_ATTEMPTS, snapshotRecoveryIntervalMs: SNAPSHOT_RECOVERY_INTERVAL_MS, lastSync: state.lastSync, catalogLive: state.catalogLive, salesLive: state.salesLive, stockLive: state.stockLive, ordersLive: state.ordersLive, totalProducts: state.totalProducts, count: state.skus.length, deadSet: Object.keys(state.soldSet100).length, sales: state.sales, topSellers: { today: (state.topSellers.today || []).slice(0, 3) }, errors: state.errors }));
 app.get("/api/catalog", (_q, res) => res.json({ source: { catalog: state.catalogLive ? "live" : "unavailable", stock: state.stockLive ? "live" : "modeled", sales: state.salesLive ? "live" : "modeled", velocity: state.ordersLive ? "live" : "modeled" }, lastSync: state.lastSync, totalProducts: state.totalProducts, count: state.skus.length, skus: state.skus }));
 app.get("/api/topsellers", (_q, res) => res.json({ available: state.ordersLive, lastSync: state.lastSync, ...state.topSellers }));
 app.get("/api/sales", (_q, res) => { state.salesLive ? res.json({ available: true, ...state.sales, lastSync: state.lastSync }) : res.json({ available: false, reason: state.errors.sales || "not synced" }); });
@@ -434,36 +449,56 @@ app.post("/api/chat", rateLimit(600000, 30), async (req, res) => {
   } catch (e) { res.status(500).json({ error: "proxy failure", detail: String(e).slice(0, 200) }); }
 });
 
+function scheduleAutomaticSyncOnce() {
+  if (automaticSyncScheduled || !stateValidated) return false;
+  const syncJitterMs = Math.floor(Math.random() * 5 * 60 * 1000);
+  const firstSyncDelayMs = automaticSyncDelay({
+    restored: true,
+    lastSync: state.lastSync,
+    syncMs: SYNC_MS,
+    jitterMs: syncJitterMs,
+  });
+  if (firstSyncDelayMs == null) return false;
+  automaticSyncScheduled = true;
+  console.log(`next Magento sync in ${Math.round(firstSyncDelayMs / 60000)} minutes`);
+  automaticSyncTimer = setTimeout(async () => {
+    automaticSyncTimer = null;
+    await runSync().catch(() => {});
+    if (!recurringSyncTimer) {
+      recurringSyncTimer = setInterval(() => runSync().catch(() => {}), SYNC_MS);
+      recurringSyncTimer.unref?.();
+    }
+  }, firstSyncDelayMs);
+  automaticSyncTimer.unref?.();
+  return true;
+}
+
+snapshotRecovery = createSnapshotRecoveryCoordinator({
+  intervalMs: SNAPSHOT_RECOVERY_INTERVAL_MS,
+  restore: restoreSnapshot,
+  onRestored: async () => {
+    console.log("snapshot recovery succeeded");
+    scheduleAutomaticSyncOnce();
+  },
+  onError: (error) => console.error("snapshot recovery error:", error.message),
+});
+
 app.listen(PORT, () => {
   console.log(`baseline-api on :${PORT} · auth ${state.auth} · model ${MODEL}`);
 
   (async () => {
     const restored = await restoreSnapshot();
-
-    // Fail closed on cold start. A transient snapshot outage must never fall
-    // through to a full Magento crawl. The secret-protected POST /api/sync route
-    // remains the explicit recovery path for an operator.
-    if (!restored) {
-      console.error("automatic Magento sync disabled: no validated snapshot; use authenticated POST /api/sync for manual recovery");
+    if (restored) {
+      scheduleAutomaticSyncOnce();
       return;
     }
 
-    const syncJitterMs = Math.floor(Math.random() * 5 * 60 * 1000);
-    const firstSyncDelayMs = automaticSyncDelay({
-      restored,
-      lastSync: state.lastSync,
-      syncMs: SYNC_MS,
-      jitterMs: syncJitterMs,
-    });
-    if (firstSyncDelayMs == null) return;
-    console.log(`next Magento sync in ${Math.round(firstSyncDelayMs / 60000)} minutes`);
-
-    const scheduledSyncTimer = setTimeout(async () => {
-      await runSync().catch(() => {});
-      const recurringSyncTimer = setInterval(() => runSync().catch(() => {}), SYNC_MS);
-      recurringSyncTimer.unref?.();
-    }, firstSyncDelayMs);
-    scheduledSyncTimer.unref?.();
+    // Recovery retries only the validated snapshot path. Magento remains manual
+    // until a snapshot succeeds, and the normal scheduler is installed once.
+    console.error("automatic Magento sync disabled until a validated snapshot is restored; authenticated POST /api/sync remains available");
+    if (snapshotRecovery.start()) {
+      console.log(`snapshot-only recovery scheduled in ${Math.round(SNAPSHOT_RECOVERY_INTERVAL_MS / 60000)} minutes`);
+    }
   })().catch((error) => {
     state.errors.snapshot = error.message;
     console.error("startup scheduling failed:", error.message);
