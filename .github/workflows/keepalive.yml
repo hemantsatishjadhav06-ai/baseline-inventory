@@ -1,6 +1,5 @@
 name: keepalive
-# Keeps the free Render backend warm so the Magento sync completes and stays cached.
-# Runs every 10 minutes (GitHub's free scheduler) — no secrets needed, just pings public URLs.
+# Keep the free Render process warm without touching Magento-backed data routes.
 on:
   schedule:
     - cron: "*/10 * * * *"
@@ -9,9 +8,8 @@ jobs:
   ping:
     runs-on: ubuntu-latest
     steps:
-      - name: Ping backend (wake + keep warm)
+      - name: Ping process-only health endpoint
         run: |
-          curl -s -m 90 https://baseline-api-hbul.onrender.com/api/health  > /dev/null || true
-          curl -s -m 120 https://baseline-api-hbul.onrender.com/api/catalog > /dev/null || true
-          curl -s -m 90  https://baseline-api-hbul.onrender.com/api/sales   > /dev/null || true
-          echo "pinged $(date -u)"
+          curl --fail --silent --show-error --max-time 30 \
+            https://baseline-api-hbul.onrender.com/api/health > /dev/null || true
+          echo "health ping $(date -u)"
