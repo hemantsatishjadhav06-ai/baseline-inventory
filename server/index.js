@@ -53,6 +53,12 @@ const requestedSyncMs = Number(process.env.SYNC_INTERVAL_MS || 6 * 3600 * 1000);
 const SYNC_MS = Number.isFinite(requestedSyncMs)
   ? Math.max(6 * 3600 * 1000, requestedSyncMs)
   : 6 * 3600 * 1000;
+const SNAPSHOT_URL = process.env.SNAPSHOT_URL
+  || "https://raw.githubusercontent.com/hemantsatishjadhav06-ai/baseline-inventory/data/live.json";
+const configuredSnapshotTimeoutMs = Number(process.env.SNAPSHOT_TIMEOUT_MS || 30000);
+const SNAPSHOT_TIMEOUT_MS = Number.isFinite(configuredSnapshotTimeoutMs)
+  ? Math.max(5000, configuredSnapshotTimeoutMs)
+  : 30000;
 
 // OAuth 1.0a
 const CK = process.env.MAGENTO_CONSUMER_KEY;
@@ -143,6 +149,53 @@ function modelOps(sku, category, price) {
 }
 
 const state = { lastSync: null, catalogLive: false, salesLive: false, stockLive: false, ordersLive: false, totalProducts: 0, skus: [], sales: null, topSellers: {}, soldSet100: {}, soldSet100At: 0, errors: {}, auth: OAUTH ? "oauth" : "none" };
+
+// Render free instances can sleep and lose memory. Restore the last validated snapshot
+// before scheduling Magento work so a cold wake serves data immediately and does not
+// launch another full origin crawl.
+async function restoreSnapshot() {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), SNAPSHOT_TIMEOUT_MS);
+  try {
+    const response = await fetch(SNAPSHOT_URL, {
+      headers: { Accept: "application/json", "User-Agent": "baseline-inventory/1.2" },
+      signal: controller.signal,
+    });
+    if (!response.ok) throw new Error(`snapshot HTTP ${response.status}`);
+    const bytes = Number(response.headers.get("content-length") || 0);
+    if (bytes > 10 * 1024 * 1024) throw new Error("snapshot exceeds 10 MB");
+
+    const snapshot = await response.json();
+    const source = snapshot?.source || {};
+    if (!snapshot?.ready || !Array.isArray(snapshot.skus) || snapshot.skus.length === 0) {
+      throw new Error("snapshot is incomplete");
+    }
+    if (source.catalog !== "live" || source.stock !== "live") {
+      throw new Error("snapshot catalog/stock is not live");
+    }
+
+    const { available: _salesAvailable, ...sales } = snapshot.sales || {};
+    const { available: _topAvailable, ...topSellers } = snapshot.topSellers || {};
+    state.skus = snapshot.skus;
+    state.totalProducts = Number(snapshot.totalProducts || snapshot.skus.length);
+    state.sales = sales;
+    state.topSellers = topSellers;
+    state.lastSync = snapshot.lastSync || snapshot.generatedAt || new Date().toISOString();
+    state.catalogLive = true;
+    state.stockLive = true;
+    state.salesLive = Boolean(snapshot.sales?.available || source.sales === "live");
+    state.ordersLive = Boolean(snapshot.topSellers?.available || source.velocity === "live");
+    delete state.errors.snapshot;
+    console.log(`snapshot restored: ${state.skus.length} SKUs from ${state.lastSync}`);
+    return true;
+  } catch (error) {
+    state.errors.snapshot = error.name === "AbortError" ? "snapshot timeout" : error.message;
+    console.error("snapshot restore failed:", state.errors.snapshot);
+    return false;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
 
 async function syncCatalog() {
   if (!OAUTH) { state.errors.catalog = "Magento OAuth creds not set"; return; }
@@ -310,25 +363,27 @@ app.post("/api/chat", rateLimit(600000, 30), async (req, res) => {
 app.listen(PORT, () => {
   console.log(`baseline-api on :${PORT} · auth ${state.auth} · model ${MODEL}`);
 
-  // Keep startup healthy first, then begin one slow background synchronization.
-  // Jitter prevents deploys/restarts from lining up with the chatbot refresh jobs.
-  const configuredStartupDelayMs = Number(process.env.STARTUP_SYNC_DELAY_MS);
-  const startupDelayMs = Number.isFinite(configuredStartupDelayMs) && configuredStartupDelayMs >= 0
-    ? configuredStartupDelayMs
-    : 60_000 + Math.floor(Math.random() * 120_000);
-  const startupTimer = setTimeout(() => {
-    runSync()
-      .then(() => console.log(`sync: ${state.skus.length} SKUs in stock`))
-      .catch((error) => console.error("sync err", error.message));
-  }, startupDelayMs);
-  startupTimer.unref?.();
+  (async () => {
+    const restored = await restoreSnapshot();
+    const snapshotTime = Date.parse(state.lastSync || "");
+    const snapshotAgeMs = Number.isFinite(snapshotTime) ? Math.max(0, Date.now() - snapshotTime) : SYNC_MS;
+    const syncJitterMs = Math.floor(Math.random() * 15 * 60 * 1000);
 
-  const syncJitterMs = Math.floor(Math.random() * 15 * 60 * 1000);
-  const scheduledSyncTimer = setTimeout(() => {
-    runSync().catch(() => {});
-    const recurringSyncTimer = setInterval(() => runSync().catch(() => {}), SYNC_MS);
-    recurringSyncTimer.unref?.();
-  }, SYNC_MS + syncJitterMs);
-  scheduledSyncTimer.unref?.();
+    // A valid recent snapshot suppresses cold-start synchronization completely.
+    // If it is stale or unavailable, still wait at least five minutes so rapid
+    // sleep/wake or restart loops cannot repeatedly hammer Magento.
+    const untilDueMs = restored ? Math.max(0, SYNC_MS - snapshotAgeMs) : 0;
+    const firstSyncDelayMs = Math.max(5 * 60 * 1000, untilDueMs) + syncJitterMs;
+    console.log(`next Magento sync in ${Math.round(firstSyncDelayMs / 60000)} minutes`);
 
+    const scheduledSyncTimer = setTimeout(async () => {
+      await runSync().catch(() => {});
+      const recurringSyncTimer = setInterval(() => runSync().catch(() => {}), SYNC_MS);
+      recurringSyncTimer.unref?.();
+    }, firstSyncDelayMs);
+    scheduledSyncTimer.unref?.();
+  })().catch((error) => {
+    state.errors.snapshot = error.message;
+    console.error("startup scheduling failed:", error.message);
+  });
 });
