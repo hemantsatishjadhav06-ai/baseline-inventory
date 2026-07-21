@@ -159,3 +159,15 @@ export function createSnapshotRecoveryCoordinator({
     isCompleted: () => completed,
   };
 }
+
+export function createGuardedSnapshotRecovery({
+  isValidated,
+  isSyncing,
+  restore,
+}) {
+  return async () => {
+    if (isValidated()) return true;
+    if (isSyncing()) return false;
+    return restore();
+  };
+}
