@@ -53,6 +53,12 @@ const requestedSyncMs = Number(process.env.SYNC_INTERVAL_MS || 6 * 3600 * 1000);
 const SYNC_MS = Number.isFinite(requestedSyncMs)
   ? Math.max(6 * 3600 * 1000, requestedSyncMs)
   : 6 * 3600 * 1000;
+const SNAPSHOT_URL = process.env.SNAPSHOT_URL
+  || "https://raw.githubusercontent.com/hemantsatishjadhav06-ai/baseline-inventory/data/live.json";
+const configuredSnapshotTimeoutMs = Number(process.env.SNAPSHOT_TIMEOUT_MS || 30000);
+const SNAPSHOT_TIMEOUT_MS = Number.isFinite(configuredSnapshotTimeoutMs)
+  ? Math.max(5000, configuredSnapshotTimeoutMs)
+  : 30000;
 
 // OAuth 1.0a
 const CK = process.env.MAGENTO_CONSUMER_KEY;
@@ -144,13 +150,94 @@ function modelOps(sku, category, price) {
 
 const state = { lastSync: null, catalogLive: false, salesLive: false, stockLive: false, ordersLive: false, totalProducts: 0, skus: [], sales: null, topSellers: {}, soldSet100: {}, soldSet100At: 0, errors: {}, auth: OAUTH ? "oauth" : "none" };
 
+// Render free instances can sleep and lose memory. Restore the last validated snapshot
+// before scheduling Magento work so a cold wake serves data immediately and does not
+// launch another full origin crawl.
+async function restoreSnapshot() {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), SNAPSHOT_TIMEOUT_MS);
+  try {
+    const response = await fetch(SNAPSHOT_URL, {
+      headers: { Accept: "application/json", "User-Agent": "baseline-inventory/1.2" },
+      signal: controller.signal,
+    });
+    if (!response.ok) throw new Error(`snapshot HTTP ${response.status}`);
+
+    const body = await response.text();
+    if (Buffer.byteLength(body, "utf8") > 10 * 1024 * 1024) {
+      throw new Error("snapshot exceeds 10 MB");
+    }
+    const snapshot = JSON.parse(body);
+    const source = snapshot?.source || {};
+    const skus = snapshot?.skus;
+    const declaredCount = Number(snapshot?.count);
+    const totalProducts = Number(snapshot?.totalProducts);
+    const timestamp = snapshot?.lastSync || snapshot?.generatedAt;
+    const timestampMs = typeof timestamp === "string" ? Date.parse(timestamp) : NaN;
+
+    if (!snapshot?.ready || !Array.isArray(skus) || skus.length === 0) {
+      throw new Error("snapshot is incomplete");
+    }
+    if (!Number.isInteger(declaredCount) || declaredCount !== skus.length || declaredCount > 100000) {
+      throw new Error("snapshot count is invalid");
+    }
+    if (!Number.isFinite(totalProducts) || totalProducts < declaredCount || totalProducts > 1000000) {
+      throw new Error("snapshot totalProducts is invalid");
+    }
+    if (!Number.isFinite(timestampMs) || timestampMs > Date.now() + 5 * 60 * 1000) {
+      throw new Error("snapshot timestamp is invalid");
+    }
+    if (source.catalog !== "live" || source.stock !== "live"
+        || source.sales !== "live" || source.velocity !== "live") {
+      throw new Error("snapshot sources are not fully live");
+    }
+    if (!snapshot.sales?.available
+        || !["today", "week", "month"].every((key) => Number.isFinite(Number(snapshot.sales[key])))) {
+      throw new Error("snapshot sales are invalid");
+    }
+    if (!snapshot.topSellers?.available
+        || !["today", "week", "month", "all"].every((key) => Array.isArray(snapshot.topSellers[key]))) {
+      throw new Error("snapshot top sellers are invalid");
+    }
+
+    const invalidSku = skus.find((item) => (
+      !item || typeof item.sku !== "string" || item.sku.length === 0 || item.sku.length > 160
+      || typeof item.name !== "string" || item.name.length === 0
+      || !Number.isFinite(Number(item.price))
+      || !Number.isFinite(Number(item.onHand))
+    ));
+    if (invalidSku) throw new Error("snapshot contains an invalid SKU");
+
+    const { available: _salesAvailable, ...sales } = snapshot.sales;
+    const { available: _topAvailable, ...topSellers } = snapshot.topSellers;
+    state.skus = skus;
+    state.totalProducts = totalProducts;
+    state.sales = sales;
+    state.topSellers = topSellers;
+    state.lastSync = new Date(timestampMs).toISOString();
+    state.catalogLive = true;
+    state.stockLive = true;
+    state.salesLive = true;
+    state.ordersLive = true;
+    delete state.errors.snapshot;
+    console.log(`snapshot restored: ${state.skus.length} SKUs from ${state.lastSync}`);
+    return true;
+  } catch (error) {
+    state.errors.snapshot = error.name === "AbortError" ? "snapshot timeout" : error.message;
+    console.error("snapshot restore failed:", state.errors.snapshot);
+    return false;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 async function syncCatalog() {
   if (!OAUTH) { state.errors.catalog = "Magento OAuth creds not set"; return; }
   await loadBrands();
-  const out = []; const seen = new Set();
+  const out = []; const seen = new Set(); const failedCategories = [];
   for (const [cid, bucket] of Object.entries(CAT_IDS)) {
     try {
-      let page = 1, got = 0;
+      let page = 1, got = 0, expectedTotal = null, categoryComplete = false;
       while (page <= 120) { // pageSize 50 lowers per-query EAV pressure; loop still breaks at total_count
         const data = await mg("/products", {
           "searchCriteria[filterGroups][0][filters][0][field]": "category_id",
@@ -160,6 +247,7 @@ async function syncCatalog() {
           fields: "total_count,items[sku,name,price,status,type_id,extension_attributes[website_ids],custom_attributes[attribute_code,value]]",
         });
         const tc = data.total_count || 0;
+        expectedTotal = tc;
         for (const p of data.items || []) {
           if (!p.sku || seen.has(p.sku) || p.type_id !== "simple" || p.status !== 1) continue;
           const price = Number(p.price || 0); if (price <= 0) continue;
@@ -172,12 +260,26 @@ async function syncCatalog() {
           out.push({ sku: p.sku, name: p.name, category: bucket, brand, mrp: Math.round(price), price: Math.round(sale), discount: sale < price ? Math.round((1 - sale / price) * 100) : 0, wsites: wsites.length ? wsites : ["tennisoutlet"], leadTime: LEAD[brand] || 14, ...modelOps(p.sku, bucket, Math.round(sale)) });
         }
         got += (data.items || []).length;
-        if (got >= tc || !(data.items || []).length) break; page++;
+        if (got >= tc) { categoryComplete = true; break; }
+        if (!(data.items || []).length) break;
+        page++;
       }
-    } catch (e) { state.errors.catalog = `cat ${cid}: ${e.status || e.message}`; }
+      if (!categoryComplete) {
+        failedCategories.push(`${cid}: incomplete pagination (${got}/${expectedTotal ?? "unknown"})`);
+      }
+    } catch (e) { failedCategories.push(`${cid}: ${e.status || e.message}`); }
   }
-  if (out.length) { state.skus = out; state.catalogLive = true; delete state.errors.catalog; }
-  try { const t = await mg("/products", { "searchCriteria[pageSize]": "1", fields: "total_count" }); state.totalProducts = t.total_count || out.length; } catch { }
+  if (failedCategories.length || !out.length) {
+    state.errors.catalog = failedCategories.length
+      ? `failed categories: ${failedCategories.join(", ")}`
+      : "catalog returned no products";
+    return false;
+  }
+  state.skus = out;
+  state.catalogLive = true;
+  delete state.errors.catalog;
+  try { const t = await mg("/products", { "searchCriteria[pageSize]": "1", fields: "total_count" }); state.totalProducts = t.total_count || out.length; } catch { state.totalProducts = out.length; }
+  return true;
 }
 
 async function syncStock() {
@@ -276,11 +378,56 @@ async function syncOrders() {
 }
 let syncing = false;
 async function runSync() {
-  if (syncing) return; syncing = true;
-  try { await syncCatalog(); await syncSales(); await syncOrders(); await syncStock(); state.lastSync = new Date().toISOString(); }
-  finally { syncing = false; }
+  if (syncing) return false;
+  if (!OAUTH) {
+    state.errors.sync = "Magento OAuth creds not set";
+    return false;
+  }
+
+  syncing = true;
+  const previous = JSON.parse(JSON.stringify(state));
+  try {
+    const catalogOk = await syncCatalog();
+    if (!catalogOk || !state.catalogLive || state.errors.catalog) {
+      throw new Error("catalog sync failed");
+    }
+
+    await syncSales();
+    if (!state.salesLive || state.errors.sales) {
+      throw new Error("sales sync failed");
+    }
+
+    await syncOrders();
+    if (!state.ordersLive || state.errors.orders) {
+      throw new Error("orders sync failed");
+    }
+
+    await syncStock();
+    if (!state.stockLive || state.errors.stock) {
+      throw new Error("stock sync failed");
+    }
+
+    const requiredErrors = ["catalog", "sales", "orders", "stock"].filter((key) => state.errors[key]);
+    const allLive = state.catalogLive && state.salesLive && state.ordersLive && state.stockLive;
+    if (!allLive || requiredErrors.length) {
+      throw new Error(requiredErrors.length
+        ? `sync components failed: ${requiredErrors.join(", ")}`
+        : "sync did not produce a complete live snapshot");
+    }
+
+    state.lastSync = new Date().toISOString();
+    delete state.errors.sync;
+    return true;
+  } catch (error) {
+    const failure = error.message || "sync failed";
+    Object.assign(state, previous);
+    state.errors = { ...(previous.errors || {}), sync: failure };
+    console.error("sync rolled back:", failure);
+    return false;
+  } finally {
+    syncing = false;
+  }
 }
-const stale = () => !state.lastSync || Date.now() - new Date(state.lastSync).getTime() > SYNC_MS;
 
 app.get("/", (_q, res) => res.json({ ok: true, service: "baseline-api", auth: state.auth, lastSync: state.lastSync, catalogLive: state.catalogLive, salesLive: state.salesLive, stockLive: state.stockLive }));
 // All GET routes are cache-only. A dashboard read or health probe must never start
@@ -289,7 +436,7 @@ app.get("/api/health", (_q, res) => res.json({ ok: true, model: MODEL, auth: sta
 app.get("/api/catalog", (_q, res) => res.json({ source: { catalog: state.catalogLive ? "live" : "unavailable", stock: state.stockLive ? "live" : "modeled", sales: state.salesLive ? "live" : "modeled", velocity: state.ordersLive ? "live" : "modeled" }, lastSync: state.lastSync, totalProducts: state.totalProducts, count: state.skus.length, skus: state.skus }));
 app.get("/api/topsellers", (_q, res) => res.json({ available: state.ordersLive, lastSync: state.lastSync, ...state.topSellers }));
 app.get("/api/sales", (_q, res) => { state.salesLive ? res.json({ available: true, ...state.sales, lastSync: state.lastSync }) : res.json({ available: false, reason: state.errors.sales || "not synced" }); });
-app.post("/api/sync", rateLimit(3600000, 2), requireSecret, async (_q, res) => { await runSync(); res.json({ ok: true, lastSync: state.lastSync, count: state.skus.length, salesLive: state.salesLive, stockLive: state.stockLive, sales: state.sales }); });
+app.post("/api/sync", rateLimit(3600000, 2), requireSecret, async (_q, res) => { const ok = await runSync(); res.status(ok ? 200 : 503).json({ ok, lastSync: state.lastSync, count: state.skus.length, salesLive: state.salesLive, stockLive: state.stockLive, sales: state.sales, error: ok ? undefined : state.errors.sync }); });
 app.post("/api/refreshdead", rateLimit(3600000, 10), requireSecret, async (_q, res) => { await refreshDeadSet(true); const n = Object.keys(state.soldSet100).length; for (const s of state.skus) s.soldWithin100 = n ? !!state.soldSet100[s.sku] : true; res.json({ deadSet: n, dead: state.skus.filter((s) => s.soldWithin100 === false).length }); });
 
 app.post("/api/chat", rateLimit(600000, 30), async (req, res) => {
@@ -310,25 +457,27 @@ app.post("/api/chat", rateLimit(600000, 30), async (req, res) => {
 app.listen(PORT, () => {
   console.log(`baseline-api on :${PORT} · auth ${state.auth} · model ${MODEL}`);
 
-  // Keep startup healthy first, then begin one slow background synchronization.
-  // Jitter prevents deploys/restarts from lining up with the chatbot refresh jobs.
-  const configuredStartupDelayMs = Number(process.env.STARTUP_SYNC_DELAY_MS);
-  const startupDelayMs = Number.isFinite(configuredStartupDelayMs) && configuredStartupDelayMs >= 0
-    ? configuredStartupDelayMs
-    : 60_000 + Math.floor(Math.random() * 120_000);
-  const startupTimer = setTimeout(() => {
-    runSync()
-      .then(() => console.log(`sync: ${state.skus.length} SKUs in stock`))
-      .catch((error) => console.error("sync err", error.message));
-  }, startupDelayMs);
-  startupTimer.unref?.();
+  (async () => {
+    const restored = await restoreSnapshot();
+    const snapshotTime = Date.parse(state.lastSync || "");
+    const snapshotAgeMs = Number.isFinite(snapshotTime) ? Math.max(0, Date.now() - snapshotTime) : SYNC_MS;
+    const syncJitterMs = Math.floor(Math.random() * 5 * 60 * 1000);
 
-  const syncJitterMs = Math.floor(Math.random() * 15 * 60 * 1000);
-  const scheduledSyncTimer = setTimeout(() => {
-    runSync().catch(() => {});
-    const recurringSyncTimer = setInterval(() => runSync().catch(() => {}), SYNC_MS);
-    recurringSyncTimer.unref?.();
-  }, SYNC_MS + syncJitterMs);
-  scheduledSyncTimer.unref?.();
+    // A valid recent snapshot suppresses cold-start synchronization completely.
+    // If it is stale or unavailable, still wait at least five minutes so rapid
+    // sleep/wake or restart loops cannot repeatedly hammer Magento.
+    const untilDueMs = restored ? Math.max(0, SYNC_MS - snapshotAgeMs) : 0;
+    const firstSyncDelayMs = Math.max(5 * 60 * 1000, untilDueMs) + syncJitterMs;
+    console.log(`next Magento sync in ${Math.round(firstSyncDelayMs / 60000)} minutes`);
 
+    const scheduledSyncTimer = setTimeout(async () => {
+      await runSync().catch(() => {});
+      const recurringSyncTimer = setInterval(() => runSync().catch(() => {}), SYNC_MS);
+      recurringSyncTimer.unref?.();
+    }, firstSyncDelayMs);
+    scheduledSyncTimer.unref?.();
+  })().catch((error) => {
+    state.errors.snapshot = error.message;
+    console.error("startup scheduling failed:", error.message);
+  });
 });
