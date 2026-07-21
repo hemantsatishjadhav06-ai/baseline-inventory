@@ -33,13 +33,12 @@ function rateLimit(windowMs, max) {
 }
 setInterval(() => { const now = Date.now(); for (const [ip, ts] of _rl) { const keep = ts.filter((t) => now - t < 3600000); keep.length ? _rl.set(ip, keep) : _rl.delete(ip); } }, 3600000).unref?.();
 
-// Optional shared-secret guard for the admin/sync endpoints. If SYNC_SECRET is set
-// in the environment, callers must present it (x-sync-secret header or ?key=); if
-// it is unset the endpoints stay open (rate-limited only) so nothing breaks today.
+// Full Magento synchronizations are administrative operations. Fail closed unless
+// Render has a SYNC_SECRET and the caller presents it in x-sync-secret (or ?key=).
 const SYNC_SECRET = process.env.SYNC_SECRET || "";
 const safeEq = (a, b) => { const A = Buffer.from(String(a)), B = Buffer.from(String(b)); return A.length === B.length && crypto.timingSafeEqual(A, B); };
 function requireSecret(req, res, next) {
-  if (!SYNC_SECRET) return next();
+  if (!SYNC_SECRET) return res.status(503).json({ error: "sync endpoint disabled" });
   const k = req.headers["x-sync-secret"] || req.query.key;
   if (k && safeEq(k, SYNC_SECRET)) return next();
   return res.status(401).json({ error: "unauthorized" });
@@ -50,7 +49,10 @@ const OR_KEY = process.env.OPENROUTER_API_KEY;
 const MODEL = process.env.OPENROUTER_MODEL || "openai/gpt-4o-mini";
 const MG_BASE = process.env.MAGENTO_BASE_URL || "https://console.tennisoutlet.in";
 const MG_PREFIX = "/rest/V1";
-const SYNC_MS = Number(process.env.SYNC_INTERVAL_MS || 10 * 60 * 1000);
+const requestedSyncMs = Number(process.env.SYNC_INTERVAL_MS || 6 * 3600 * 1000);
+const SYNC_MS = Number.isFinite(requestedSyncMs)
+  ? Math.max(6 * 3600 * 1000, requestedSyncMs)
+  : 6 * 3600 * 1000;
 
 // OAuth 1.0a
 const CK = process.env.MAGENTO_CONSUMER_KEY;
@@ -60,27 +62,65 @@ const ATS = process.env.MAGENTO_ACCESS_TOKEN_SECRET;
 const OAUTH = !!(CK && CS && AT && ATS);
 
 const enc = (s) => encodeURIComponent(String(s)).replace(/[!*'()]/g, (c) => "%" + c.charCodeAt(0).toString(16).toUpperCase());
-// Gentle client-side throttle (~6 req/s) so the larger, un-truncated syncs don't trip Magento rate limits.
+// Serialize every Magento request through one bounded queue. The previous 150ms
+// delay allowed ~6 requests/second and concurrent callers could bypass it; Magento
+// product/EAV queries are too expensive for that cadence on the shared origin.
+const configuredMagentoIntervalMs = Number(process.env.MAGENTO_MIN_INTERVAL_MS || 3000);
+const MAGENTO_MIN_INTERVAL_MS = Number.isFinite(configuredMagentoIntervalMs)
+  ? Math.max(1000, configuredMagentoIntervalMs)
+  : 3000;
+const configuredMagentoTimeoutMs = Number(process.env.MAGENTO_TIMEOUT_MS || 60000);
+const MAGENTO_TIMEOUT_MS = Number.isFinite(configuredMagentoTimeoutMs)
+  ? Math.max(10000, configuredMagentoTimeoutMs)
+  : 60000;
 let _mgLast = 0;
+let _mgQueue = Promise.resolve();
+
 async function mg(path, params = {}) {
-  const _wait = Math.max(0, _mgLast + 150 - Date.now());
-  if (_wait) await new Promise((r) => setTimeout(r, _wait));
-  _mgLast = Date.now();
-  const url = MG_BASE + MG_PREFIX + path;
-  const o = {
-    oauth_consumer_key: CK, oauth_token: AT, oauth_signature_method: "HMAC-SHA256",
-    oauth_timestamp: String(Math.floor(Date.now() / 1000)),
-    oauth_nonce: crypto.randomBytes(16).toString("hex"), oauth_version: "1.0",
-  };
-  const all = { ...params, ...o };
-  const paramStr = Object.keys(all).sort().map((k) => `${enc(k)}=${enc(all[k])}`).join("&");
-  const base = ["GET", enc(url), enc(paramStr)].join("&");
-  const sig = crypto.createHmac("sha256", `${enc(CS)}&${enc(ATS)}`).update(base).digest("base64");
-  o.oauth_signature = sig;
-  const auth = "OAuth " + Object.keys(o).map((k) => `${enc(k)}="${enc(o[k])}"`).join(", ");
-  const qs = Object.keys(params).map((k) => `${enc(k)}=${enc(params[k])}`).join("&");
-  return fetch(url + (qs ? "?" + qs : ""), { headers: { Authorization: auth, Accept: "application/json" } })
-    .then(async (r) => { if (!r.ok) { const e = new Error(`HTTP ${r.status}`); e.status = r.status; e.body = await r.text(); throw e; } return r.json(); });
+  const task = _mgQueue.then(async () => {
+    const waitMs = Math.max(0, _mgLast + MAGENTO_MIN_INTERVAL_MS - Date.now());
+    if (waitMs) await new Promise((resolve) => setTimeout(resolve, waitMs));
+    _mgLast = Date.now();
+
+    const url = MG_BASE + MG_PREFIX + path;
+    const oauth = {
+      oauth_consumer_key: CK, oauth_token: AT, oauth_signature_method: "HMAC-SHA256",
+      oauth_timestamp: String(Math.floor(Date.now() / 1000)),
+      oauth_nonce: crypto.randomBytes(16).toString("hex"), oauth_version: "1.0",
+    };
+    const all = { ...params, ...oauth };
+    const paramStr = Object.keys(all).sort().map((k) => `${enc(k)}=${enc(all[k])}`).join("&");
+    const base = ["GET", enc(url), enc(paramStr)].join("&");
+    oauth.oauth_signature = crypto.createHmac("sha256", `${enc(CS)}&${enc(ATS)}`).update(base).digest("base64");
+    const auth = "OAuth " + Object.keys(oauth).map((k) => `${enc(k)}="${enc(oauth[k])}"`).join(", ");
+    const qs = Object.keys(params).map((k) => `${enc(k)}=${enc(params[k])}`).join("&");
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), MAGENTO_TIMEOUT_MS);
+    try {
+      const response = await fetch(url + (qs ? "?" + qs : ""), {
+        headers: {
+          Authorization: auth,
+          Accept: "application/json",
+          "User-Agent": "baseline-inventory/1.1",
+          "X-Client-ID": "baseline-inventory",
+        },
+        signal: controller.signal,
+      });
+      if (!response.ok) {
+        const error = new Error(`HTTP ${response.status}`);
+        error.status = response.status;
+        error.body = await response.text();
+        throw error;
+      }
+      return await response.json();
+    } finally {
+      clearTimeout(timeout);
+    }
+  });
+
+  _mgQueue = task.catch(() => {});
+  return task;
 }
 const hmod = (s, salt, m) => parseInt(crypto.createHash("md5").update(s + salt).digest("hex").slice(0, 8), 16) % m;
 
@@ -111,13 +151,13 @@ async function syncCatalog() {
   for (const [cid, bucket] of Object.entries(CAT_IDS)) {
     try {
       let page = 1, got = 0;
-      while (page <= 60) { // cover full categories (Racquets ~2.7k, Shoes ~1.9k); loop breaks early at total_count
+      while (page <= 120) { // pageSize 50 lowers per-query EAV pressure; loop still breaks at total_count
         const data = await mg("/products", {
           "searchCriteria[filterGroups][0][filters][0][field]": "category_id",
           "searchCriteria[filterGroups][0][filters][0][value]": cid,
           "searchCriteria[filterGroups][0][filters][0][conditionType]": "eq",
-          "searchCriteria[pageSize]": "100", "searchCriteria[currentPage]": String(page),
-          fields: "total_count,items[sku,name,price,status,type_id,extension_attributes[website_ids],custom_attributes]",
+          "searchCriteria[pageSize]": "50", "searchCriteria[currentPage]": String(page),
+          fields: "total_count,items[sku,name,price,status,type_id,extension_attributes[website_ids],custom_attributes[attribute_code,value]]",
         });
         const tc = data.total_count || 0;
         for (const p of data.items || []) {
@@ -158,9 +198,10 @@ async function syncStock() {
     for (const s of state.skus) s.soldWithin100 = ready ? !!set[s.sku] : true;
   } catch (e) { state.stockLive = false; state.errors.stock = `${e.status || e.message}`; }
 }
-// 100-day "has it sold?" set — real dead-stock signal. Heavy (≈108 pages), so cached & refreshed every 6h.
+// 100-day "has it sold?" set — real dead-stock signal. It is a heavy historical
+// crawl, so refresh it at most once per day.
 async function refreshDeadSet(force = false) {
-  if (!force && state.soldSet100At && Date.now() - state.soldSet100At < 6 * 3600 * 1000) return;
+  if (!force && state.soldSet100At && Date.now() - state.soldSet100At < 24 * 3600 * 1000) return;
   try {
     const since = istDayStartUTC(100); const set = {}; let page = 1, seen = 0;
     while (page <= 200) { // newest-first + server-side 100d filter → page through ALL in-window orders (breaks at total_count). The old cap+no-sort dropped the most RECENT orders, falsely flagging live SKUs as dead.
@@ -242,11 +283,13 @@ async function runSync() {
 const stale = () => !state.lastSync || Date.now() - new Date(state.lastSync).getTime() > SYNC_MS;
 
 app.get("/", (_q, res) => res.json({ ok: true, service: "baseline-api", auth: state.auth, lastSync: state.lastSync, catalogLive: state.catalogLive, salesLive: state.salesLive, stockLive: state.stockLive }));
-app.get("/api/health", (_q, res) => res.json({ ok: true, model: MODEL, auth: state.auth, lastSync: state.lastSync, catalogLive: state.catalogLive, salesLive: state.salesLive, stockLive: state.stockLive, ordersLive: state.ordersLive, totalProducts: state.totalProducts, count: state.skus.length, deadSet: Object.keys(state.soldSet100).length, sales: state.sales, topSellers: { today: (state.topSellers.today || []).slice(0, 3) }, errors: state.errors }));
-app.get("/api/catalog", async (_q, res) => { if (!state.lastSync && !syncing) await runSync().catch(() => {}); else if (stale() && !syncing) runSync().catch(() => {}); res.json({ source: { catalog: state.catalogLive ? "live" : "unavailable", stock: state.stockLive ? "live" : "modeled", sales: state.salesLive ? "live" : "modeled", velocity: state.ordersLive ? "live" : "modeled" }, lastSync: state.lastSync, totalProducts: state.totalProducts, count: state.skus.length, skus: state.skus }); });
-app.get("/api/topsellers", async (_q, res) => { if (!state.lastSync && !syncing) await runSync().catch(() => {}); else if (stale() && !syncing) runSync().catch(() => {}); res.json({ available: state.ordersLive, lastSync: state.lastSync, ...state.topSellers }); });
-app.get("/api/sales", async (_q, res) => { if (!state.lastSync && !syncing) await runSync().catch(() => {}); else if (stale() && !syncing) runSync().catch(() => {}); state.salesLive ? res.json({ available: true, ...state.sales, lastSync: state.lastSync }) : res.json({ available: false, reason: state.errors.sales || "not synced" }); });
-app.post("/api/sync", rateLimit(3600000, 20), requireSecret, async (_q, res) => { await runSync(); res.json({ ok: true, lastSync: state.lastSync, count: state.skus.length, salesLive: state.salesLive, stockLive: state.stockLive, sales: state.sales }); });
+// All GET routes are cache-only. A dashboard read or health probe must never start
+// a full Magento crawl.
+app.get("/api/health", (_q, res) => res.json({ ok: true, model: MODEL, auth: state.auth, syncing, syncIntervalMs: SYNC_MS, magentoMinIntervalMs: MAGENTO_MIN_INTERVAL_MS, lastSync: state.lastSync, catalogLive: state.catalogLive, salesLive: state.salesLive, stockLive: state.stockLive, ordersLive: state.ordersLive, totalProducts: state.totalProducts, count: state.skus.length, deadSet: Object.keys(state.soldSet100).length, sales: state.sales, topSellers: { today: (state.topSellers.today || []).slice(0, 3) }, errors: state.errors }));
+app.get("/api/catalog", (_q, res) => res.json({ source: { catalog: state.catalogLive ? "live" : "unavailable", stock: state.stockLive ? "live" : "modeled", sales: state.salesLive ? "live" : "modeled", velocity: state.ordersLive ? "live" : "modeled" }, lastSync: state.lastSync, totalProducts: state.totalProducts, count: state.skus.length, skus: state.skus }));
+app.get("/api/topsellers", (_q, res) => res.json({ available: state.ordersLive, lastSync: state.lastSync, ...state.topSellers }));
+app.get("/api/sales", (_q, res) => { state.salesLive ? res.json({ available: true, ...state.sales, lastSync: state.lastSync }) : res.json({ available: false, reason: state.errors.sales || "not synced" }); });
+app.post("/api/sync", rateLimit(3600000, 2), requireSecret, async (_q, res) => { await runSync(); res.json({ ok: true, lastSync: state.lastSync, count: state.skus.length, salesLive: state.salesLive, stockLive: state.stockLive, sales: state.sales }); });
 app.post("/api/refreshdead", rateLimit(3600000, 10), requireSecret, async (_q, res) => { await refreshDeadSet(true); const n = Object.keys(state.soldSet100).length; for (const s of state.skus) s.soldWithin100 = n ? !!state.soldSet100[s.sku] : true; res.json({ deadSet: n, dead: state.skus.filter((s) => s.soldWithin100 === false).length }); });
 
 app.post("/api/chat", rateLimit(600000, 30), async (req, res) => {
@@ -266,7 +309,32 @@ app.post("/api/chat", rateLimit(600000, 30), async (req, res) => {
 
 app.listen(PORT, () => {
   console.log(`baseline-api on :${PORT} · auth ${state.auth} · model ${MODEL}`);
-  runSync().then(() => { console.log(`sync: ${state.skus.length} SKUs in stock`); refreshDeadSet(true).then(() => console.log(`deadset: ${Object.keys(state.soldSet100).length} SKUs sold in 100d`)).catch(() => {}); }).catch((e) => console.error("sync err", e.message));
-  setInterval(() => runSync().catch(() => { }), SYNC_MS);
-  setInterval(() => refreshDeadSet().catch(() => { }), 6 * 3600 * 1000);
+
+  // Keep startup healthy first, then begin one slow background synchronization.
+  // Jitter prevents deploys/restarts from lining up with the chatbot refresh jobs.
+  const configuredStartupDelayMs = Number(process.env.STARTUP_SYNC_DELAY_MS);
+  const startupDelayMs = Number.isFinite(configuredStartupDelayMs) && configuredStartupDelayMs >= 0
+    ? configuredStartupDelayMs
+    : 60_000 + Math.floor(Math.random() * 120_000);
+  const startupTimer = setTimeout(() => {
+    runSync()
+      .then(() => {
+        console.log(`sync: ${state.skus.length} SKUs in stock`);
+        return refreshDeadSet();
+      })
+      .then(() => console.log(`deadset: ${Object.keys(state.soldSet100).length} SKUs sold in 100d`))
+      .catch((error) => console.error("sync err", error.message));
+  }, startupDelayMs);
+  startupTimer.unref?.();
+
+  const syncJitterMs = Math.floor(Math.random() * 15 * 60 * 1000);
+  const scheduledSyncTimer = setTimeout(() => {
+    runSync().catch(() => {});
+    const recurringSyncTimer = setInterval(() => runSync().catch(() => {}), SYNC_MS);
+    recurringSyncTimer.unref?.();
+  }, SYNC_MS + syncJitterMs);
+  scheduledSyncTimer.unref?.();
+
+  const deadSetTimer = setInterval(() => refreshDeadSet().catch(() => {}), 24 * 3600 * 1000);
+  deadSetTimer.unref?.();
 });

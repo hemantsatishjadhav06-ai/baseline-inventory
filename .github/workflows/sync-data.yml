@@ -1,10 +1,9 @@
 name: sync-data
-# Magento IP-restricts: only the Render backend (allowed IP) can reach it. So GitHub Actions
-# SNAPSHOTS the backend (catalog+sales+stock+topsellers) into data/live.json every 15 min.
-# The static dashboard reads live.json => always fresh, no user-facing cold start.
+# Snapshot the API's cached state. This workflow must never start a Magento crawl;
+# the backend owns one serialized, six-hour synchronization schedule.
 on:
   schedule:
-    - cron: "*/15 * * * *"
+    - cron: "17 * * * *"
   workflow_dispatch: {}
 permissions:
   contents: write
@@ -16,48 +15,77 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Snapshot backend -> live.json
+      - name: Snapshot cached backend state
         run: |
           python3 - <<'PY'
-          import json, urllib.request, time, datetime
+          import datetime
+          import json
+          import urllib.request
+
           API = "https://baseline-api-hbul.onrender.com"
-          def get(p):
-              with urllib.request.urlopen(API + p, timeout=120) as r: return json.load(r)
-          try: urllib.request.urlopen(urllib.request.Request(API + "/api/sync", method="POST"), timeout=10)
-          except Exception: pass
-          ready = False
-          for _ in range(28):
-              try:
-                  h = get("/api/health")
-                  if h.get("catalogLive") and h.get("salesLive") and h.get("ordersLive") and h.get("stockLive"):
-                      ready = True; break
-              except Exception: pass
-              time.sleep(15)
-          cat = get("/api/catalog"); sales = get("/api/sales"); top = get("/api/topsellers")
-          out = {
-              "generatedAt": datetime.datetime.utcnow().isoformat() + "Z",
-              "ready": ready,
-              "source": cat.get("source"),
-              "totalProducts": cat.get("totalProducts"),
-              "count": cat.get("count"),
-              "skus": cat.get("skus", []),
-              "sales": {"available": bool(sales.get("available")), "today": sales.get("today"), "week": sales.get("week"), "month": sales.get("month"), "currency": "INR", "byStoreMonth": sales.get("byStoreMonth"), "byStoreToday": sales.get("byStoreToday")},
-              "topSellers": {"available": bool(top.get("available")), "today": top.get("today", []), "week": top.get("week", []), "month": top.get("month", []), "all": top.get("all", [])},
+
+          def get(path):
+              with urllib.request.urlopen(API + path, timeout=60) as response:
+                  return json.load(response)
+
+          try:
+              health = get("/api/health")
+          except Exception as error:
+              print("backend unavailable — keeping last-good live.json:", error)
+              raise SystemExit(0)
+
+          required = ("catalogLive", "salesLive", "ordersLive", "stockLive")
+          ready = all(health.get(field) for field in required)
+          if not ready:
+              print("backend cache is not ready — keeping last-good live.json")
+              print({field: health.get(field) for field in required})
+              raise SystemExit(0)
+
+          catalog = get("/api/catalog")
+          sales = get("/api/sales")
+          top = get("/api/topsellers")
+          output = {
+              "generatedAt": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+              "lastSync": health.get("lastSync"),
+              "ready": True,
+              "source": catalog.get("source"),
+              "totalProducts": catalog.get("totalProducts"),
+              "count": catalog.get("count"),
+              "skus": catalog.get("skus", []),
+              "sales": {
+                  "available": bool(sales.get("available")),
+                  "today": sales.get("today"),
+                  "week": sales.get("week"),
+                  "month": sales.get("month"),
+                  "currency": "INR",
+                  "byStoreMonth": sales.get("byStoreMonth"),
+                  "byStoreToday": sales.get("byStoreToday"),
+              },
+              "topSellers": {
+                  "available": bool(top.get("available")),
+                  "today": top.get("today", []),
+                  "week": top.get("week", []),
+                  "month": top.get("month", []),
+                  "all": top.get("all", []),
+              },
           }
-          stock_live = (cat.get("source") or {}).get("stock") == "live"
-          if out["count"] and stock_live and out["sales"]["available"]:
-              open("/tmp/live.json", "w").write(json.dumps(out)); print("READY — will publish")
+          stock_live = (catalog.get("source") or {}).get("stock") == "live"
+          if output["count"] and stock_live and output["sales"]["available"]:
+              with open("/tmp/live.json", "w") as handle:
+                  json.dump(output, handle)
+              print("READY — will publish cached snapshot")
           else:
-              print("NOT READY (count/stock/sales incomplete) — skipping publish to keep last-good data")
-          print("ready", ready, "| stockLive", stock_live, "| count", out["count"], "| today", out["sales"]["today"])
+              print("incomplete cache — keeping last-good live.json")
+          print("lastSync", output["lastSync"], "| count", output["count"], "| today", output["sales"]["today"])
           PY
-      - name: Publish to data branch (only if fresh data is complete)
+      - name: Publish to data branch
         run: |
           if [ ! -f /tmp/live.json ]; then echo "no fresh file — keeping last-good live.json"; exit 0; fi
-          git config user.name "baseline-bot"; git config user.email "bot@baseline.local"
+          git config user.name "baseline-bot"
+          git config user.email "bot@baseline.local"
           git checkout --orphan data
           git rm -rf . >/dev/null 2>&1 || true
           cp /tmp/live.json live.json
           git add live.json
-          git commit -m "data: live.json $(date -u +%FT%TZ)"
+          git commit -m "data: cached live.json $(date -u +%FT%TZ)"
           git push -f origin data
