@@ -9,6 +9,7 @@ import crypto from "crypto";
 import {
   automaticSyncDelay,
   boundedInteger,
+  createGuardedSnapshotRecovery,
   createSnapshotRecoveryCoordinator,
   loadSnapshotWithRetry,
 } from "./snapshot.js";
@@ -177,6 +178,13 @@ async function restoreSnapshot() {
         console.warn(`snapshot attempt ${failedAttempt}/${SNAPSHOT_FETCH_ATTEMPTS} failed: ${error.message}`);
       },
     });
+
+    // An authenticated manual sync may have started or completed while the
+    // snapshot was downloading. Never overwrite its newer in-memory state.
+    if (syncing || stateValidated) {
+      console.warn("snapshot apply skipped because Magento sync state is active or newer");
+      return stateValidated;
+    }
 
     state.skus = snapshot.skus;
     state.totalProducts = snapshot.totalProducts;
@@ -475,7 +483,11 @@ function scheduleAutomaticSyncOnce() {
 
 snapshotRecovery = createSnapshotRecoveryCoordinator({
   intervalMs: SNAPSHOT_RECOVERY_INTERVAL_MS,
-  restore: restoreSnapshot,
+  restore: createGuardedSnapshotRecovery({
+    isValidated: () => stateValidated,
+    isSyncing: () => syncing,
+    restore: restoreSnapshot,
+  }),
   onRestored: async () => {
     console.log("snapshot recovery succeeded");
     scheduleAutomaticSyncOnce();
