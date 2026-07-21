@@ -1,6 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { automaticSyncDelay, loadSnapshotWithRetry, validateAndNormalizeSnapshot } from "../snapshot.js";
+import {
+  automaticSyncDelay,
+  createSnapshotRecoveryCoordinator,
+  loadSnapshotWithRetry,
+  validateAndNormalizeSnapshot,
+} from "../snapshot.js";
 
 const NOW = Date.parse("2026-07-21T09:00:00.000Z");
 const validSnapshot = (overrides = {}) => ({
@@ -82,4 +87,38 @@ test("stale restored state schedules only after minimum delay and jitter", () =>
     restored: true, lastSync: "2026-07-21T00:00:00.000Z",
     syncMs: 6 * 60 * 60 * 1000, nowMs: NOW, jitterMs: 1234,
   }), 5 * 60 * 1000 + 1234);
+});
+
+test("snapshot-only recovery re-arms after failure and completes once", async () => {
+  const timers = [];
+  let restores = 0;
+  let schedulerCalls = 0;
+  const coordinator = createSnapshotRecoveryCoordinator({
+    intervalMs: 300000,
+    restore: async () => ++restores >= 2,
+    onRestored: async () => { schedulerCalls++; },
+    setTimer: (callback, delay) => {
+      const timer = { callback, delay, unref() {} };
+      timers.push(timer);
+      return timer;
+    },
+    clearTimer: () => {},
+  });
+
+  assert.equal(coordinator.start(), true);
+  assert.equal(coordinator.start(), false);
+  assert.equal(timers.length, 1);
+  assert.equal(timers[0].delay, 300000);
+
+  await timers.shift().callback();
+  assert.equal(restores, 1);
+  assert.equal(schedulerCalls, 0);
+  assert.equal(timers.length, 1);
+
+  await timers.shift().callback();
+  assert.equal(restores, 2);
+  assert.equal(schedulerCalls, 1);
+  assert.equal(coordinator.isCompleted(), true);
+  assert.equal(timers.length, 0);
+  assert.equal(coordinator.start(), false);
 });
