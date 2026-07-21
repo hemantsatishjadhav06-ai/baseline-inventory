@@ -237,7 +237,7 @@ async function syncCatalog() {
   const out = []; const seen = new Set(); const failedCategories = [];
   for (const [cid, bucket] of Object.entries(CAT_IDS)) {
     try {
-      let page = 1, got = 0;
+      let page = 1, got = 0, expectedTotal = null, categoryComplete = false;
       while (page <= 120) { // pageSize 50 lowers per-query EAV pressure; loop still breaks at total_count
         const data = await mg("/products", {
           "searchCriteria[filterGroups][0][filters][0][field]": "category_id",
@@ -247,6 +247,7 @@ async function syncCatalog() {
           fields: "total_count,items[sku,name,price,status,type_id,extension_attributes[website_ids],custom_attributes[attribute_code,value]]",
         });
         const tc = data.total_count || 0;
+        expectedTotal = tc;
         for (const p of data.items || []) {
           if (!p.sku || seen.has(p.sku) || p.type_id !== "simple" || p.status !== 1) continue;
           const price = Number(p.price || 0); if (price <= 0) continue;
@@ -259,7 +260,12 @@ async function syncCatalog() {
           out.push({ sku: p.sku, name: p.name, category: bucket, brand, mrp: Math.round(price), price: Math.round(sale), discount: sale < price ? Math.round((1 - sale / price) * 100) : 0, wsites: wsites.length ? wsites : ["tennisoutlet"], leadTime: LEAD[brand] || 14, ...modelOps(p.sku, bucket, Math.round(sale)) });
         }
         got += (data.items || []).length;
-        if (got >= tc || !(data.items || []).length) break; page++;
+        if (got >= tc) { categoryComplete = true; break; }
+        if (!(data.items || []).length) break;
+        page++;
+      }
+      if (!categoryComplete) {
+        failedCategories.push(`${cid}: incomplete pagination (${got}/${expectedTotal ?? "unknown"})`);
       }
     } catch (e) { failedCategories.push(`${cid}: ${e.status || e.message}`); }
   }
@@ -382,12 +388,27 @@ async function runSync() {
   const previous = JSON.parse(JSON.stringify(state));
   try {
     const catalogOk = await syncCatalog();
+    if (!catalogOk || !state.catalogLive || state.errors.catalog) {
+      throw new Error("catalog sync failed");
+    }
+
     await syncSales();
+    if (!state.salesLive || state.errors.sales) {
+      throw new Error("sales sync failed");
+    }
+
     await syncOrders();
+    if (!state.ordersLive || state.errors.orders) {
+      throw new Error("orders sync failed");
+    }
+
     await syncStock();
+    if (!state.stockLive || state.errors.stock) {
+      throw new Error("stock sync failed");
+    }
 
     const requiredErrors = ["catalog", "sales", "orders", "stock"].filter((key) => state.errors[key]);
-    const allLive = catalogOk && state.catalogLive && state.salesLive && state.ordersLive && state.stockLive;
+    const allLive = state.catalogLive && state.salesLive && state.ordersLive && state.stockLive;
     if (!allLive || requiredErrors.length) {
       throw new Error(requiredErrors.length
         ? `sync components failed: ${requiredErrors.join(", ")}`
