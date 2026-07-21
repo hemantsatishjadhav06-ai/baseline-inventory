@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   automaticSyncDelay,
+  createGuardedSnapshotRecovery,
   createSnapshotRecoveryCoordinator,
   loadSnapshotWithRetry,
   validateAndNormalizeSnapshot,
@@ -121,4 +122,66 @@ test("snapshot-only recovery re-arms after failure and completes once", async ()
   assert.equal(coordinator.isCompleted(), true);
   assert.equal(timers.length, 0);
   assert.equal(coordinator.start(), false);
+});
+
+test("manual-valid state completes recovery without fetching or overwriting", async () => {
+  const timers = [];
+  let stateValidated = false;
+  let syncing = false;
+  let snapshotFetches = 0;
+  let schedulerCalls = 0;
+  const manualState = { lastSync: null, count: 0 };
+  const guardedRestore = createGuardedSnapshotRecovery({
+    isValidated: () => stateValidated,
+    isSyncing: () => syncing,
+    restore: async () => {
+      snapshotFetches++;
+      manualState.lastSync = "old-snapshot";
+      manualState.count = 1;
+      return true;
+    },
+  });
+  const coordinator = createSnapshotRecoveryCoordinator({
+    intervalMs: 300000,
+    restore: guardedRestore,
+    onRestored: async () => { schedulerCalls++; },
+    setTimer: (callback, delay) => {
+      const timer = { callback, delay, unref() {} };
+      timers.push(timer);
+      return timer;
+    },
+    clearTimer: () => {},
+  });
+
+  coordinator.start();
+  manualState.lastSync = "new-manual-sync";
+  manualState.count = 3867;
+  stateValidated = true;
+  await timers.shift().callback();
+
+  assert.equal(snapshotFetches, 0);
+  assert.deepEqual(manualState, { lastSync: "new-manual-sync", count: 3867 });
+  assert.equal(schedulerCalls, 1);
+  assert.equal(coordinator.isCompleted(), true);
+
+  // A sync in progress is never overlapped and instead re-arms recovery.
+  stateValidated = false;
+  syncing = true;
+  const secondTimers = [];
+  const second = createSnapshotRecoveryCoordinator({
+    intervalMs: 300000,
+    restore: guardedRestore,
+    onRestored: async () => { schedulerCalls++; },
+    setTimer: (callback, delay) => {
+      const timer = { callback, delay, unref() {} };
+      secondTimers.push(timer);
+      return timer;
+    },
+    clearTimer: () => {},
+  });
+  second.start();
+  await secondTimers.shift().callback();
+  assert.equal(snapshotFetches, 0);
+  assert.equal(second.isCompleted(), false);
+  assert.equal(secondTimers.length, 1);
 });
