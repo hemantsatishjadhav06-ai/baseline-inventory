@@ -112,3 +112,50 @@ export function automaticSyncDelay({
   const untilDueMs = Math.max(0, syncMs - snapshotAgeMs);
   return Math.max(minDelayMs, untilDueMs) + Math.max(0, jitterMs);
 }
+
+export function createSnapshotRecoveryCoordinator({
+  intervalMs,
+  restore,
+  onRestored,
+  setTimer = setTimeout,
+  clearTimer = clearTimeout,
+  onError = () => {},
+}) {
+  let timer = null;
+  let running = false;
+  let completed = false;
+
+  const schedule = () => {
+    if (completed || running || timer) return false;
+    timer = setTimer(async () => {
+      timer = null;
+      if (completed || running) return;
+      running = true;
+      try {
+        const restored = await restore();
+        if (restored) {
+          completed = true;
+          await onRestored();
+        }
+      } catch (error) {
+        onError(error);
+      } finally {
+        running = false;
+      }
+      if (!completed) schedule();
+    }, intervalMs);
+    timer.unref?.();
+    return true;
+  };
+
+  return {
+    start: schedule,
+    stop() {
+      if (timer) clearTimer(timer);
+      timer = null;
+    },
+    isScheduled: () => Boolean(timer),
+    isRunning: () => running,
+    isCompleted: () => completed,
+  };
+}
